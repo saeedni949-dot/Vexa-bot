@@ -46,6 +46,27 @@ async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    messages = []
+
+    for article in feed.entries[:5]:
+        title = article.get("title", "بدون عنوان")
+        link = article.get("link", "")
+
+        messages.append(
+            f"⚽️ {title}\n"
+            f"🔗 {link}"
+        )
+
+    text = "🌍 آخرین اخبار فوتبال\n\n" + "\n\n".join(messages)
+
+    await update.message.reply_text(text))
+
+    if not feed.entries:
+        await update.message.reply_text(
+            "❌ فعلاً خبری پیدا نکردم."
+        )
+        return
+
     article = feed.entries[0]
 
     title = article.get("title", "بدون عنوان")
