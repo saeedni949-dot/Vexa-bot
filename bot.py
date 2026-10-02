@@ -3,6 +3,8 @@ import feedparser
 import html
 import re
 
+from deep_translator import GoogleTranslator
+
 from telegram import Update, BotCommand
 from telegram.ext import (
     Application,
@@ -21,6 +23,11 @@ RSS_FEEDS = {
 
 sent_links = set()
 
+translator = GoogleTranslator(
+    source="auto",
+    target="fa"
+)
+
 
 def clean_text(text):
     if not text:
@@ -31,6 +38,19 @@ def clean_text(text):
     text = re.sub(r"\s+", " ", text)
 
     return text.strip()
+
+
+def translate_to_persian(text):
+    if not text:
+        return ""
+
+    try:
+        translated = translator.translate(text)
+        return clean_text(translated)
+
+    except Exception as e:
+        print(f"Translation error: {e}")
+        return text
 
 
 def get_summary(article):
@@ -47,11 +67,23 @@ def get_summary(article):
     return summary
 
 
+def translate_news(title, summary):
+    persian_title = translate_to_persian(title)
+
+    if summary:
+        persian_summary = translate_to_persian(summary)
+    else:
+        persian_summary = ""
+
+    return persian_title, persian_summary
+
+
 # =========================
 # Telegram Command Menu
 # =========================
 
 async def post_init(application: Application):
+
     commands = [
         BotCommand("start", "شروع Vexa"),
         BotCommand("news", "آخرین اخبار فوتبال"),
@@ -66,7 +98,11 @@ async def post_init(application: Application):
 # Commands
 # =========================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
     await update.message.reply_text(
         "سلام! 👋\n"
         "من Vexa هستم 🤖⚽\n\n"
@@ -75,7 +111,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
     await update.message.reply_text(
         "📚 راهنمای Vexa\n\n"
         "/start - شروع بات\n"
@@ -85,7 +125,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def test_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def test_post(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
     await context.bot.send_message(
         chat_id=CHANNEL_ID,
         text="🤖 Vexa با موفقیت به کانال متصل شد! 🚀"
@@ -97,47 +141,66 @@ async def test_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# News
+# News Command
 # =========================
 
-async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def news(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
     messages = []
 
     for source, url in RSS_FEEDS.items():
+
         feed = feedparser.parse(url)
 
         if not feed.entries:
             continue
 
         for article in feed.entries[:3]:
+
             title = clean_text(
-                article.get("title", "بدون عنوان")
+                article.get(
+                    "title",
+                    "بدون عنوان"
+                )
             )
 
             summary = get_summary(article)
 
-            if summary:
+            persian_title, persian_summary = translate_news(
+                title,
+                summary
+            )
+
+            if persian_summary:
+
                 message = (
-                    f"⚽️ {title}\n\n"
-                    f"📝 {summary}\n\n"
+                    f"⚽️ {persian_title}\n\n"
+                    f"📝 {persian_summary}\n\n"
                     f"🏷 منبع: {source}"
                 )
+
             else:
+
                 message = (
-                    f"⚽️ {title}\n\n"
+                    f"⚽️ {persian_title}\n\n"
                     f"🏷 منبع: {source}"
                 )
 
             messages.append(message)
 
     if not messages:
+
         await update.message.reply_text(
             "❌ فعلاً خبری پیدا نکردم."
         )
+
         return
 
     text = (
-        "🌍 آخرین اخبار فوتبال\n\n"
+        "🌍🇮🇷 آخرین اخبار فوتبال\n\n"
         + "\n\n".join(messages[:9])
     )
 
@@ -148,7 +211,9 @@ async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Automatic News
 # =========================
 
-async def automatic_news(context: ContextTypes.DEFAULT_TYPE):
+async def automatic_news(
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     for source, url in RSS_FEEDS.items():
 
@@ -160,7 +225,10 @@ async def automatic_news(context: ContextTypes.DEFAULT_TYPE):
         for article in feed.entries[:3]:
 
             title = clean_text(
-                article.get("title", "بدون عنوان")
+                article.get(
+                    "title",
+                    "بدون عنوان"
+                )
             )
 
             link = article.get("link", "")
@@ -168,7 +236,7 @@ async def automatic_news(context: ContextTypes.DEFAULT_TYPE):
             if not link:
                 continue
 
-            # جلوگیری از ارسال دوباره یک خبر
+            # جلوگیری از ارسال خبر تکراری
             if link in sent_links:
                 continue
 
@@ -176,17 +244,26 @@ async def automatic_news(context: ContextTypes.DEFAULT_TYPE):
 
             summary = get_summary(article)
 
-            if summary:
+            # ترجمه به فارسی
+            persian_title, persian_summary = translate_news(
+                title,
+                summary
+            )
+
+            if persian_summary:
+
                 message = (
-                    "🌍⚽️ خبر جدید فوتبال\n\n"
-                    f"📰 {title}\n\n"
-                    f"📝 {summary}\n\n"
+                    "🌍🇮🇷⚽️ خبر جدید فوتبال\n\n"
+                    f"📰 {persian_title}\n\n"
+                    f"📝 {persian_summary}\n\n"
                     f"🏷 منبع: {source}"
                 )
+
             else:
+
                 message = (
-                    "🌍⚽️ خبر جدید فوتبال\n\n"
-                    f"📰 {title}\n\n"
+                    "🌍🇮🇷⚽️ خبر جدید فوتبال\n\n"
+                    f"📰 {persian_title}\n\n"
                     f"🏷 منبع: {source}"
                 )
 
@@ -205,7 +282,9 @@ def main():
     token = os.getenv("BOT_TOKEN")
 
     if not token:
-        raise ValueError("BOT_TOKEN is not set!")
+        raise ValueError(
+            "BOT_TOKEN is not set!"
+        )
 
     app = (
         Application.builder()
@@ -215,30 +294,46 @@ def main():
     )
 
     # Commands
+
     app.add_handler(
-        CommandHandler("start", start)
+        CommandHandler(
+            "start",
+            start
+        )
     )
 
     app.add_handler(
-        CommandHandler("help", help_command)
+        CommandHandler(
+            "help",
+            help_command
+        )
     )
 
     app.add_handler(
-        CommandHandler("testpost", test_post)
+        CommandHandler(
+            "testpost",
+            test_post
+        )
     )
 
     app.add_handler(
-        CommandHandler("news", news)
+        CommandHandler(
+            "news",
+            news
+        )
     )
 
-    # Automatic news every 10 minutes
+    # اخبار خودکار هر ۱۰ دقیقه
+
     app.job_queue.run_repeating(
         automatic_news,
         interval=600,
         first=30
     )
 
-    print("Vexa bot is running...")
+    print(
+        "Vexa bot is running..."
+    )
 
     app.run_polling()
 
