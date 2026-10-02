@@ -4,14 +4,18 @@ import re
 import asyncio
 import html
 import urllib.request
+import urllib.parse
+import io
 import feedparser
 
 from openai import AsyncOpenAI
+
 from telegram import (
     Update,
     BotCommand,
     ReplyKeyboardMarkup,
 )
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -35,6 +39,10 @@ AI_MODEL = "gpt-6-luna"
 MAX_ARTICLES = 9
 
 NEWS_INTERVAL = 600
+
+IMAGE_TIMEOUT = 12
+
+MAX_IMAGE_SIZE = 12 * 1024 * 1024
 
 
 if not BOT_TOKEN:
@@ -73,9 +81,11 @@ RSS_FEEDS = {
 
 sent_links = set()
 
+sent_title_keys = set()
+
 
 # =========================================================
-# TEXT CLEANING
+# TEXT HELPERS
 # =========================================================
 
 def clean_text(text):
@@ -83,7 +93,9 @@ def clean_text(text):
     if not text:
         return ""
 
-    text = html.unescape(text)
+    text = html.unescape(
+        str(text)
+    )
 
     text = re.sub(
         r"<[^>]+>",
@@ -100,7 +112,10 @@ def clean_text(text):
     return text.strip()
 
 
-def limit_text(text, max_length):
+def limit_text(
+    text,
+    max_length
+):
 
     if not text:
         return ""
@@ -126,13 +141,160 @@ def escape_html(text):
     )
 
 
+def normalize_title(title):
+
+    title = clean_text(
+        title
+    ).lower()
+
+    title = re.sub(
+        r"[^\w\s]",
+        " ",
+        title
+    )
+
+    title = re.sub(
+        r"\s+",
+        " ",
+        title
+    )
+
+    return title.strip()
+
+
 # =========================================================
-# HIGH QUALITY IMAGE SYSTEM
+# URL HELPERS
 # =========================================================
 
-def get_image_candidates(entry):
+def make_absolute_url(
+    image_url,
+    article_url
+):
+
+    if not image_url:
+        return None
+
+    image_url = html.unescape(
+        image_url
+    ).strip()
+
+    if image_url.startswith(
+        "//"
+    ):
+
+        return "https:" + image_url
+
+
+    if image_url.startswith(
+        "/"
+    ):
+
+        try:
+
+            return urllib.parse.urljoin(
+                article_url,
+                image_url
+            )
+
+        except Exception:
+
+            return image_url
+
+
+    if image_url.startswith(
+        (
+            "http://",
+            "https://"
+        )
+    ):
+
+        return image_url
+
+
+    try:
+
+        return urllib.parse.urljoin(
+            article_url,
+            image_url
+        )
+
+    except Exception:
+
+        return image_url
+
+
+# =========================================================
+# IMAGE CANDIDATE SYSTEM
+# =========================================================
+
+def add_image_candidate(
+    candidates,
+    url,
+    width=0,
+    height=0,
+    priority=0
+):
+
+    if not url:
+        return
+
+    try:
+
+        width = int(
+            width or 0
+        )
+
+    except Exception:
+
+        width = 0
+
+
+    try:
+
+        height = int(
+            height or 0
+        )
+
+    except Exception:
+
+        height = 0
+
+
+    score = (
+        priority * 100000000
+        +
+        width * height
+    )
+
+
+    candidates.append({
+
+        "url": url,
+
+        "width": width,
+
+        "height": height,
+
+        "score": score,
+
+    })
+
+
+# =========================================================
+# RSS IMAGE EXTRACTION
+# =========================================================
+
+def get_rss_image_candidates(
+    entry
+):
 
     candidates = []
+
+    article_url = entry.get(
+        "link",
+        ""
+    )
+
 
     try:
 
@@ -145,6 +307,7 @@ def get_image_candidates(entry):
             []
         )
 
+
         for media in media_content:
 
             if not isinstance(
@@ -153,59 +316,42 @@ def get_image_candidates(entry):
             ):
                 continue
 
+
             url = media.get(
                 "url",
                 ""
             )
 
+
+            url = make_absolute_url(
+                url,
+                article_url
+            )
+
+
             if not url:
                 continue
 
-            try:
 
-                width = int(
-                    media.get(
-                        "width",
-                        0
-                    )
-                    or 0
-                )
+            add_image_candidate(
 
-            except Exception:
+                candidates,
 
-                width = 0
+                url,
 
+                media.get(
+                    "width",
+                    0
+                ),
 
-            try:
+                media.get(
+                    "height",
+                    0
+                ),
 
-                height = int(
-                    media.get(
-                        "height",
-                        0
-                    )
-                    or 0
-                )
+                priority=10
 
-            except Exception:
-
-                height = 0
-
-
-            candidates.append({
-
-                "url":
-                    url,
-
-                "width":
-                    width,
-
-                "height":
-                    height,
-
-                "score":
-                    width * height,
-
-            })
+            )
 
 
         # -------------------------------------------------
@@ -217,6 +363,7 @@ def get_image_candidates(entry):
             []
         )
 
+
         for media in thumbnails:
 
             if not isinstance(
@@ -225,59 +372,42 @@ def get_image_candidates(entry):
             ):
                 continue
 
+
             url = media.get(
                 "url",
                 ""
             )
 
+
+            url = make_absolute_url(
+                url,
+                article_url
+            )
+
+
             if not url:
                 continue
 
-            try:
 
-                width = int(
-                    media.get(
-                        "width",
-                        0
-                    )
-                    or 0
-                )
+            add_image_candidate(
 
-            except Exception:
+                candidates,
 
-                width = 0
+                url,
 
+                media.get(
+                    "width",
+                    0
+                ),
 
-            try:
+                media.get(
+                    "height",
+                    0
+                ),
 
-                height = int(
-                    media.get(
-                        "height",
-                        0
-                    )
-                    or 0
-                )
+                priority=2
 
-            except Exception:
-
-                height = 0
-
-
-            candidates.append({
-
-                "url":
-                    url,
-
-                "width":
-                    width,
-
-                "height":
-                    height,
-
-                "score":
-                    width * height,
-
-            })
+            )
 
 
         # -------------------------------------------------
@@ -289,6 +419,7 @@ def get_image_candidates(entry):
             []
         )
 
+
         for enclosure in enclosures:
 
             if not isinstance(
@@ -296,6 +427,7 @@ def get_image_candidates(entry):
                 dict
             ):
                 continue
+
 
             url = (
 
@@ -312,6 +444,13 @@ def get_image_candidates(entry):
                 )
 
             )
+
+
+            url = make_absolute_url(
+                url,
+                article_url
+            )
+
 
             if not url:
                 continue
@@ -339,27 +478,25 @@ def get_image_candidates(entry):
 
             ):
 
-                candidates.append({
+                add_image_candidate(
 
-                    "url":
-                        url,
+                    candidates,
 
-                    "width":
-                        0,
+                    url,
 
-                    "height":
-                        0,
+                    0,
 
-                    "score":
-                        1,
+                    0,
 
-                })
+                    priority=7
+
+                )
 
 
     except Exception as e:
 
         print(
-            "RSS IMAGE ERROR:",
+            "RSS IMAGE EXTRACTION ERROR:",
             repr(e)
         )
 
@@ -368,15 +505,387 @@ def get_image_candidates(entry):
 
 
 # =========================================================
-# FIND BEST RSS IMAGE
+# HTML IMAGE EXTRACTION
 # =========================================================
 
-def get_best_rss_image(entry):
+def extract_meta_images(
+    page_html,
+    article_url
+):
 
-    candidates = get_image_candidates(
-        entry
+    candidates = []
+
+
+    # -----------------------------------------------------
+    # OG IMAGE
+    # -----------------------------------------------------
+
+    patterns = [
+
+        (
+            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+            100
+        ),
+
+        (
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+            100
+        ),
+
+        (
+            r'<meta[^>]+property=["\']og:image:url["\'][^>]+content=["\']([^"\']+)["\']',
+            100
+        ),
+
+        (
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image:url["\']',
+            100
+        ),
+
+        (
+            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+            90
+        ),
+
+        (
+            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
+            90
+        ),
+
+    ]
+
+
+    for pattern, priority in patterns:
+
+        matches = re.findall(
+            pattern,
+            page_html,
+            re.IGNORECASE
+        )
+
+
+        for image_url in matches:
+
+            image_url = make_absolute_url(
+                image_url,
+                article_url
+            )
+
+
+            if image_url:
+
+                add_image_candidate(
+
+                    candidates,
+
+                    image_url,
+
+                    0,
+
+                    0,
+
+                    priority
+
+                )
+
+
+    # -----------------------------------------------------
+    # OG IMAGE WIDTH / HEIGHT
+    # -----------------------------------------------------
+
+    width_match = re.search(
+
+        r'<meta[^>]+property=["\']og:image:width["\'][^>]+content=["\'](\d+)["\']',
+
+        page_html,
+
+        re.IGNORECASE
+
     )
 
+
+    height_match = re.search(
+
+        r'<meta[^>]+property=["\']og:image:height["\'][^>]+content=["\'](\d+)["\']',
+
+        page_html,
+
+        re.IGNORECASE
+
+    )
+
+
+    if candidates:
+
+        width = (
+            int(width_match.group(1))
+            if width_match
+            else 0
+        )
+
+        height = (
+            int(height_match.group(1))
+            if height_match
+            else 0
+        )
+
+
+        for candidate in candidates:
+
+            candidate["width"] = width
+
+            candidate["height"] = height
+
+            candidate["score"] += (
+                width * height
+            )
+
+
+    # -----------------------------------------------------
+    # JSON-LD IMAGE
+    # -----------------------------------------------------
+
+    jsonld_blocks = re.findall(
+
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+
+        page_html,
+
+        re.IGNORECASE | re.DOTALL
+
+    )
+
+
+    for block in jsonld_blocks:
+
+        try:
+
+            data = json.loads(
+                block.strip()
+            )
+
+
+            jsonld_items = []
+
+
+            if isinstance(
+                data,
+                dict
+            ):
+
+                jsonld_items.append(
+                    data
+                )
+
+
+            elif isinstance(
+                data,
+                list
+            ):
+
+                jsonld_items.extend(
+                    data
+                )
+
+
+            for item in jsonld_items:
+
+                if not isinstance(
+                    item,
+                    dict
+                ):
+                    continue
+
+
+                image = item.get(
+                    "image"
+                )
+
+
+                if isinstance(
+                    image,
+                    str
+                ):
+
+                    image_url = make_absolute_url(
+                        image,
+                        article_url
+                    )
+
+
+                    if image_url:
+
+                        add_image_candidate(
+
+                            candidates,
+
+                            image_url,
+
+                            0,
+
+                            0,
+
+                            95
+
+                        )
+
+
+                elif isinstance(
+                    image,
+                    dict
+                ):
+
+                    image_url = (
+
+                        image.get(
+                            "url"
+                        )
+
+                        or
+
+                        image.get(
+                            "contentUrl"
+                        )
+
+                    )
+
+
+                    image_url = make_absolute_url(
+                        image_url,
+                        article_url
+                    )
+
+
+                    if image_url:
+
+                        add_image_candidate(
+
+                            candidates,
+
+                            image_url,
+
+                            image.get(
+                                "width",
+                                0
+                            ),
+
+                            image.get(
+                                "height",
+                                0
+                            ),
+
+                            95
+
+                        )
+
+
+                elif isinstance(
+                    image,
+                    list
+                ):
+
+                    for image_item in image:
+
+                        if isinstance(
+                            image_item,
+                            str
+                        ):
+
+                            image_url = make_absolute_url(
+                                image_item,
+                                article_url
+                            )
+
+
+                            if image_url:
+
+                                add_image_candidate(
+
+                                    candidates,
+
+                                    image_url,
+
+                                    0,
+
+                                    0,
+
+                                    95
+
+                                )
+
+
+        except Exception:
+            continue
+
+
+    return candidates
+
+
+# =========================================================
+# DOWNLOAD ARTICLE PAGE
+# =========================================================
+
+def download_article_page(
+    article_url
+):
+
+    try:
+
+        request = urllib.request.Request(
+
+            article_url,
+
+            headers={
+
+                "User-Agent":
+                    "Mozilla/5.0 "
+                    "(Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) "
+                    "Chrome/130.0 Safari/537.36",
+
+                "Accept":
+                    "text/html,application/xhtml+xml",
+
+            }
+
+        )
+
+
+        with urllib.request.urlopen(
+            request,
+            timeout=IMAGE_TIMEOUT
+        ) as response:
+
+            data = response.read(
+                3 * 1024 * 1024
+            )
+
+
+            return data.decode(
+                "utf-8",
+                errors="ignore"
+            )
+
+
+    except Exception as e:
+
+        print(
+            "ARTICLE PAGE ERROR:",
+            repr(e)
+        )
+
+
+        return None
+
+
+# =========================================================
+# GET BEST IMAGE URL
+# =========================================================
+
+def choose_best_image(
+    candidates
+):
 
     if not candidates:
 
@@ -389,6 +898,11 @@ def get_best_rss_image(entry):
     for item in candidates:
 
         url = item["url"]
+
+
+        if not url:
+
+            continue
 
 
         if url not in unique:
@@ -412,43 +926,141 @@ def get_best_rss_image(entry):
 
 
     candidates.sort(
-        key=lambda item: item["score"],
+
+        key=lambda item:
+        item["score"],
+
         reverse=True
+
     )
 
 
-    for item in candidates:
+    # Prefer reasonably large images
+    for candidate in candidates:
 
-        url = item["url"]
+        width = candidate.get(
+            "width",
+            0
+        )
+
+        height = candidate.get(
+            "height",
+            0
+        )
 
 
-        if url.startswith(
-            (
-                "http://",
-                "https://"
-            )
+        if (
+
+            width >= 700
+            and
+            height >= 350
+
         ):
 
-            print(
-                "Selected RSS image:",
-                url
+            return candidate["url"]
+
+
+    return candidates[0]["url"]
+
+
+# =========================================================
+# FINAL IMAGE SELECTOR
+# =========================================================
+
+def get_article_image(
+    entry
+):
+
+    article_url = entry.get(
+        "link",
+        ""
+    )
+
+
+    # -----------------------------------------------------
+    # FIRST: ARTICLE PAGE
+    # -----------------------------------------------------
+
+    # This is intentionally before RSS thumbnails.
+    # The article page usually contains the original
+    # editorial image rather than a small thumbnail.
+
+    if article_url:
+
+        page_html = download_article_page(
+            article_url
+        )
+
+
+        if page_html:
+
+            page_candidates = extract_meta_images(
+
+                page_html,
+
+                article_url
+
             )
 
-            return url
+
+            page_image = choose_best_image(
+                page_candidates
+            )
+
+
+            if page_image:
+
+                print(
+                    "HIGH QUALITY PAGE IMAGE:",
+                    page_image
+                )
+
+
+                return page_image
+
+
+    # -----------------------------------------------------
+    # SECOND: RSS
+    # -----------------------------------------------------
+
+    rss_candidates = get_rss_image_candidates(
+        entry
+    )
+
+
+    rss_image = choose_best_image(
+        rss_candidates
+    )
+
+
+    if rss_image:
+
+        print(
+            "RSS IMAGE:",
+            rss_image
+        )
+
+
+        return rss_image
+
+
+    print(
+        "NO IMAGE FOUND"
+    )
 
 
     return None
 
 
 # =========================================================
-# FIND IMAGE FROM ARTICLE PAGE
+# DOWNLOAD IMAGE FILE
 # =========================================================
 
-def get_image_from_article_page(
-    article_url
+def download_image_file(
+    image_url
 ):
 
-    if not article_url:
+    if not image_url:
 
         return None
 
@@ -457,13 +1069,20 @@ def get_image_from_article_page(
 
         request = urllib.request.Request(
 
-            article_url,
+            image_url,
 
             headers={
 
                 "User-Agent":
                     "Mozilla/5.0 "
-                    "(compatible; VexaBot/1.0)"
+                    "(Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) "
+                    "Chrome/130.0 Safari/537.36",
+
+                "Accept":
+                    "image/avif,image/webp,image/apng,"
+                    "image/svg+xml,image/*,*/*;q=0.8",
 
             }
 
@@ -471,125 +1090,139 @@ def get_image_from_article_page(
 
 
         with urllib.request.urlopen(
+
             request,
-            timeout=8
+
+            timeout=IMAGE_TIMEOUT
+
         ) as response:
 
-            page_html = (
-                response
-                .read()
-                .decode(
-                    "utf-8",
-                    errors="ignore"
+
+            content_type = response.headers.get(
+                "Content-Type",
+                ""
+            ).lower()
+
+
+            content_length = response.headers.get(
+                "Content-Length"
+            )
+
+
+            if content_length:
+
+                try:
+
+                    if int(
+                        content_length
+                    ) > MAX_IMAGE_SIZE:
+
+                        print(
+                            "IMAGE TOO LARGE"
+                        )
+
+                        return None
+
+                except Exception:
+
+                    pass
+
+
+            image_data = response.read(
+                MAX_IMAGE_SIZE + 1
+            )
+
+
+            if len(image_data) > MAX_IMAGE_SIZE:
+
+                print(
+                    "IMAGE EXCEEDED SIZE LIMIT"
                 )
-            )
+
+                return None
 
 
-        # -------------------------------------------------
-        # OG IMAGE
-        # -------------------------------------------------
+            # -------------------------------------------------
+            # Basic image validation
+            # -------------------------------------------------
 
-        patterns = [
+            if (
 
-            r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+                "image/"
+                not in content_type
 
-            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+            ):
 
-            r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+                # Some servers don't send proper headers.
+                # Check common image signatures.
 
-            r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
+                valid_signatures = (
 
-        ]
+                    image_data.startswith(
+                        b"\xff\xd8\xff"
+                    ),
 
+                    image_data.startswith(
+                        b"\x89PNG"
+                    ),
 
-        for pattern in patterns:
-
-            match = re.search(
-
-                pattern,
-
-                page_html,
-
-                re.IGNORECASE
-
-            )
-
-
-            if match:
-
-                image_url = html.unescape(
-                    match.group(1)
-                ).strip()
-
-
-                if image_url.startswith(
-                    (
-                        "http://",
-                        "https://"
+                    image_data.startswith(
+                        b"RIFF"
                     )
+                    and
+                    b"WEBP"
+                    in image_data[:16],
+
+                    image_data.startswith(
+                        b"GIF8"
+                    ),
+
+                )
+
+
+                if not any(
+                    valid_signatures
                 ):
 
                     print(
-                        "Selected article page image:",
-                        image_url
+                        "DOWNLOADED FILE IS NOT AN IMAGE"
                     )
 
-                    return image_url
+                    return None
+
+
+            image_file = io.BytesIO(
+                image_data
+            )
+
+
+            image_file.seek(0)
+
+
+            image_file.name = (
+                "vexa-news.jpg"
+            )
+
+
+            print(
+                "IMAGE DOWNLOADED:",
+                len(image_data),
+                "bytes"
+            )
+
+
+            return image_file
 
 
     except Exception as e:
 
         print(
-            "ARTICLE IMAGE FETCH ERROR:",
+            "IMAGE DOWNLOAD ERROR:",
             repr(e)
         )
 
 
-    return None
-
-
-# =========================================================
-# FINAL IMAGE SELECTOR
-# =========================================================
-
-def get_article_image(entry):
-
-    # اول RSS
-    image_url = get_best_rss_image(
-        entry
-    )
-
-
-    if image_url:
-
-        return image_url
-
-
-    # بعد صفحه اصلی خبر
-    article_url = entry.get(
-        "link",
-        ""
-    )
-
-
-    if article_url:
-
-        image_url = get_image_from_article_page(
-            article_url
-        )
-
-
-        if image_url:
-
-            return image_url
-
-
-    print(
-        "No suitable image found."
-    )
-
-
-    return None
+        return None
 
 
 # =========================================================
@@ -655,6 +1288,24 @@ def collect_articles(
                     continue
 
 
+                title_key = normalize_title(
+                    title
+                )
+
+
+                if (
+
+                    link in sent_links
+
+                    or
+
+                    title_key in sent_title_keys
+
+                ):
+
+                    continue
+
+
                 image_url = get_article_image(
                     entry
                 )
@@ -703,13 +1354,8 @@ def collect_articles(
 
         link = article["link"]
 
-
-        title_key = (
-
+        title_key = normalize_title(
             article["title"]
-            .lower()
-            .strip()
-
         )
 
 
@@ -737,29 +1383,13 @@ def collect_articles(
         )
 
 
-    # =====================================================
-    # REMOVE ALREADY SENT
-    # =====================================================
-
-    new_articles = [
-
-        article
-
-        for article in unique_articles
-
-        if article["link"]
-        not in sent_links
-
-    ]
-
-
     print(
-        f"Collected {len(new_articles)} "
+        f"Collected {len(unique_articles)} "
         f"new unique articles."
     )
 
 
-    return new_articles[:limit]
+    return unique_articles[:limit]
 
 
 # =========================================================
@@ -805,39 +1435,41 @@ ARTICLE SUMMARY:
 تو سردبیر حرفه‌ای یک کانال تلگرامی اخبار فوتبال فارسی هستی.
 
 خبرهای انگلیسی زیر را برای یک کانال فوتبال فارسی
-به شکل طبیعی، جذاب، دقیق و حرفه‌ای بازنویسی کن.
+به شکل طبیعی، دقیق، جذاب و حرفه‌ای بازنویسی کن.
 
 این کار ترجمه کلمه‌به‌کلمه نیست.
 
-باید مفهوم خبر را بفهمی و آن را مثل یک خبرنگار ورزشی
-فارسی‌زبان بازنویسی کنی.
+مفهوم خبر را بفهم و سپس آن را مثل یک خبرنگار ورزشی
+فارسی‌زبان بنویس.
 
 قوانین:
 
-1. هیچ اطلاعاتی که در متن اصلی وجود ندارد اضافه نکن.
+1. هیچ اطلاعاتی که در متن اصلی نیست اضافه نکن.
 
-2. اگر اطلاعاتی ناقص است، حدس نزن.
+2. حدس نزن.
 
 3. اسم بازیکنان، مربیان، باشگاه‌ها، تیم‌های ملی
-   و مسابقات را حفظ کن.
+و مسابقات را حفظ کن.
 
 4. عنوان حدود 8 تا 15 کلمه باشد.
 
 5. خلاصه 2 تا 3 جمله باشد.
 
-6. از کلیشه‌هایی مثل:
-   «در خبری مهم»
-   «اتفاقی باورنکردنی»
-   «هواداران شوکه شدند»
-   استفاده نکن؛ مگر اینکه واقعاً در خبر وجود داشته باشد.
+6. خلاصه باید مهم‌ترین بخش خبر را در همان ابتدا منتقل کند.
 
-7. لحن حرفه‌ای، ورزشی، روان و بی‌طرف باشد.
+7. از کلیشه‌هایی مثل:
+«در خبری مهم»
+«اتفاقی باورنکردنی»
+«هواداران شوکه شدند»
+استفاده نکن.
 
-8. خبرها نباید همه با یک لحن و ساختار نوشته شوند.
+8. لحن حرفه‌ای، ورزشی، طبیعی و بی‌طرف باشد.
 
-9. نوع هر خبر را مشخص کن.
+9. خبرها نباید از نظر فرم و شروع جمله شبیه یکدیگر باشند.
 
-دسته‌بندی‌های مجاز:
+10. نوع خبر را مشخص کن.
+
+دسته‌بندی‌ها:
 
 breaking
 transfer
@@ -849,15 +1481,15 @@ record
 tournament
 other
 
-10. میزان اهمیت خبر را مشخص کن:
+11. اهمیت:
 
 high
 medium
 low
 
-11. برای هر خبر یک emoji مناسب انتخاب کن.
+12. یک emoji مناسب انتخاب کن.
 
-12. برای هر خبر یک سبک انتشار انتخاب کن:
+13. سبک انتشار:
 
 classic
 breaking
@@ -866,17 +1498,21 @@ match
 player
 stats
 
-13. سبک را بر اساس خود خبر انتخاب کن.
-همه خبرها را classic نکن.
+14. همه خبرها را classic نکن.
 
-14. خروجی فقط JSON معتبر باشد.
+15. برای خبرهای عادی از عبارت «خبر جدید فوتبال» بیش از حد استفاده نکن.
 
-15. هیچ Markdown یا توضیح اضافه ننویس.
+16. اگر خبر درباره نقل‌وانتقال است، اطلاعات قطعی و شایعه را با هم قاطی نکن.
 
-16. تعداد آیتم‌های خروجی باید دقیقاً برابر
-تعداد خبرهای ورودی باشد.
+17. اگر خبر درباره نتیجه یا مسابقه است، نتیجه را واضح بیان کن.
 
-فرمت دقیق:
+18. اگر خبر درباره مصدومیت است، فقط اطلاعات موجود در متن را بیان کن.
+
+19. خروجی فقط JSON معتبر باشد.
+
+20. تعداد آیتم‌ها باید دقیقاً برابر تعداد خبرهای ورودی باشد.
+
+فرمت:
 
 [
   {{
@@ -912,26 +1548,15 @@ stats
         )
 
 
-        print(
-            "OpenAI response received successfully."
-        )
-
-
         result = (
             response.output_text
             .strip()
         )
 
 
-        print(
-            "OpenAI response length:",
-            len(result)
-        )
-
-
-        # =================================================
+        # -------------------------------------------------
         # CLEAN MARKDOWN
-        # =================================================
+        # -------------------------------------------------
 
         result = re.sub(
             r"^```json\s*",
@@ -958,10 +1583,6 @@ stats
         result = result.strip()
 
 
-        # =================================================
-        # PARSE JSON
-        # =================================================
-
         data = json.loads(
             result
         )
@@ -982,19 +1603,48 @@ stats
         ):
 
             raise ValueError(
-                "Wrong number of translated "
-                f"articles: expected "
-                f"{len(articles)}, got "
-                f"{len(data)}"
+                "Wrong number of translated articles."
             )
 
 
         translated = []
 
 
-        # =================================================
-        # BUILD FINAL ARTICLES
-        # =================================================
+        valid_categories = {
+
+            "breaking",
+            "transfer",
+            "match",
+            "player",
+            "coach",
+            "injury",
+            "record",
+            "tournament",
+            "other",
+
+        }
+
+
+        valid_importance = {
+
+            "high",
+            "medium",
+            "low",
+
+        }
+
+
+        valid_styles = {
+
+            "classic",
+            "breaking",
+            "transfer",
+            "match",
+            "player",
+            "stats",
+
+        }
+
 
         for article, item in zip(
             articles,
@@ -1007,7 +1657,7 @@ stats
             ):
 
                 raise ValueError(
-                    "One AI result is not an object."
+                    "Invalid AI article object."
                 )
 
 
@@ -1059,42 +1709,6 @@ stats
             ).lower()
 
 
-            valid_categories = {
-
-                "breaking",
-                "transfer",
-                "match",
-                "player",
-                "coach",
-                "injury",
-                "record",
-                "tournament",
-                "other",
-
-            }
-
-
-            valid_importance = {
-
-                "high",
-                "medium",
-                "low",
-
-            }
-
-
-            valid_styles = {
-
-                "classic",
-                "breaking",
-                "transfer",
-                "match",
-                "player",
-                "stats",
-
-            }
-
-
             if category not in valid_categories:
 
                 category = "other"
@@ -1112,16 +1726,12 @@ stats
 
             if not title:
 
-                title = article[
-                    "title"
-                ]
+                title = article["title"]
 
 
             if not summary:
 
-                summary = article[
-                    "summary"
-                ]
+                summary = article["summary"]
 
 
             translated.append({
@@ -1197,26 +1807,22 @@ stats
 # NEWS DESIGN
 # =========================================================
 
-def build_news_text(article):
+def build_news_text(
+    article
+):
 
     title = escape_html(
-        clean_text(
-            article["title"]
-        )
+        article["title"]
     )
 
 
     summary = escape_html(
-        clean_text(
-            article["summary"]
-        )
+        article["summary"]
     )
 
 
     source = escape_html(
-        clean_text(
-            article["source"]
-        )
+        article["source"]
     )
 
 
@@ -1234,10 +1840,6 @@ def build_news_text(article):
     )
 
 
-    # =====================================================
-    # BREAKING
-    # =====================================================
-
     if style == "breaking":
 
         return (
@@ -1252,10 +1854,6 @@ def build_news_text(article):
 
         )
 
-
-    # =====================================================
-    # TRANSFER
-    # =====================================================
 
     if style == "transfer":
 
@@ -1272,15 +1870,11 @@ def build_news_text(article):
         )
 
 
-    # =====================================================
-    # MATCH
-    # =====================================================
-
     if style == "match":
 
         return (
 
-            "🏟️ <b>گزارش فوتبال</b>\n\n"
+            "🏟️ <b>گزارش مسابقه</b>\n\n"
 
             f"{emoji} <b>{title}</b>\n\n"
 
@@ -1290,16 +1884,12 @@ def build_news_text(article):
 
         )
 
-
-    # =====================================================
-    # PLAYER
-    # =====================================================
 
     if style == "player":
 
         return (
 
-            "👤 <b>دنیای بازیکنان</b>\n\n"
+            "👤 <b>دنیای فوتبال</b>\n\n"
 
             f"{emoji} <b>{title}</b>\n\n"
 
@@ -1309,10 +1899,6 @@ def build_news_text(article):
 
         )
 
-
-    # =====================================================
-    # STATS
-    # =====================================================
 
     if style == "stats":
 
@@ -1329,13 +1915,7 @@ def build_news_text(article):
         )
 
 
-    # =====================================================
-    # CLASSIC
-    # =====================================================
-
     return (
-
-        "🌍⚽️ <b>خبر جدید فوتبال</b>\n\n"
 
         f"{emoji} <b>{title}</b>\n\n"
 
@@ -1368,46 +1948,52 @@ async def post_article(
     try:
 
         # -------------------------------------------------
-        # TRY HIGH QUALITY IMAGE
+        # DOWNLOAD ORIGINAL IMAGE
         # -------------------------------------------------
 
         if image_url:
 
-            try:
+            image_file = await asyncio.to_thread(
 
-                await bot.send_photo(
+                download_image_file,
 
-                    chat_id=CHANNEL_USERNAME,
+                image_url
 
-                    photo=image_url,
-
-                    caption=text,
-
-                    parse_mode="HTML",
-
-                )
+            )
 
 
-                print(
-                    "Posted with image:",
-                    article["title"]
-                )
+            if image_file:
+
+                try:
+
+                    await bot.send_photo(
+
+                        chat_id=CHANNEL_USERNAME,
+
+                        photo=image_file,
+
+                        caption=text,
+
+                        parse_mode="HTML",
+
+                    )
 
 
-                return True
+                    print(
+                        "POSTED WITH ORIGINAL IMAGE:",
+                        article["title"]
+                    )
 
 
-            except Exception as image_error:
-
-                print(
-                    "IMAGE POST FAILED:",
-                    repr(image_error)
-                )
+                    return True
 
 
-                print(
-                    "Falling back to text post..."
-                )
+                except Exception as image_error:
+
+                    print(
+                        "PHOTO UPLOAD FAILED:",
+                        repr(image_error)
+                    )
 
 
         # -------------------------------------------------
@@ -1426,7 +2012,7 @@ async def post_article(
 
 
         print(
-            "Posted as text:",
+            "POSTED AS TEXT:",
             article["title"]
         )
 
@@ -1460,7 +2046,12 @@ def get_main_keyboard():
 
         [
             "🔄 نقل‌وانتقالات",
-            "⚽ اخبار فوتبال",
+            "🏟️ مسابقات",
+        ],
+
+        [
+            "👤 اخبار بازیکنان",
+            "📊 آمار و رکورد",
         ],
 
         [
@@ -1481,7 +2072,7 @@ def get_main_keyboard():
 
 
 # =========================================================
-# /START
+# START
 # =========================================================
 
 async def start(
@@ -1493,7 +2084,7 @@ async def start(
 
         "سلام 👋🔥\n\n"
 
-        "من <b>Vexa</b> هستم 🤖⚽️\n"
+        "من <b>Vexa</b> هستم 🤖⚽️\n\n"
 
         "دستیار اخبار فوتبال فارسی.\n\n"
 
@@ -1503,9 +2094,11 @@ async def start(
         "📰 آخرین اخبار\n"
         "🔥 اخبار مهم\n"
         "🔄 نقل‌وانتقالات\n"
-        "⚽ اخبار فوتبال\n\n"
+        "🏟️ مسابقات\n"
+        "👤 بازیکنان\n"
+        "📊 آمار و رکوردها\n\n"
 
-        "بریم برای خبرهای جدید! 🚀",
+        "🚀 آماده‌ام!",
 
         parse_mode="HTML",
 
@@ -1515,7 +2108,7 @@ async def start(
 
 
 # =========================================================
-# /HELP
+# HELP
 # =========================================================
 
 async def help_command(
@@ -1531,22 +2124,25 @@ async def help_command(
         "آخرین اخبار فوتبال\n\n"
 
         "🔥 /important\n"
-        "خبرهای مهم‌تر\n\n"
+        "اخبار مهم\n\n"
 
         "🔄 /transfers\n"
-        "اخبار نقل‌وانتقالات\n\n"
+        "نقل‌وانتقالات\n\n"
 
-        "⚽ /football\n"
-        "اخبار فوتبال\n\n"
+        "🏟️ /matches\n"
+        "اخبار مسابقات\n\n"
+
+        "👤 /players\n"
+        "اخبار بازیکنان\n\n"
+
+        "📊 /stats\n"
+        "آمار و رکوردها\n\n"
 
         "🤖 /about\n"
         "درباره Vexa\n\n"
 
         "🧪 /testpost\n"
-        "تست ارسال به کانال\n\n"
-
-        "ℹ️ /help\n"
-        "نمایش راهنما",
+        "تست ارسال",
 
         parse_mode="HTML",
 
@@ -1568,17 +2164,18 @@ async def about_command(
 
         "🤖 <b>Vexa</b>\n\n"
 
-        "یک ربات خبری فوتبال است که اخبار منابع مختلف "
-        "را جمع‌آوری می‌کند، با کمک هوش مصنوعی بازنویسی "
-        "می‌کند و به کانال @fcnewsss ارسال می‌کند. ⚽️🔥\n\n"
+        "Vexa یک دستیار خبری فوتبال است که اخبار "
+        "منابع مختلف را جمع‌آوری می‌کند، بررسی و "
+        "بازنویسی می‌کند و در کانال منتشر می‌کند. ⚽️\n\n"
 
         "📰 اخبار فوتبال\n"
         "🔄 نقل‌وانتقالات\n"
         "🏟️ مسابقات\n"
         "👤 بازیکنان\n"
-        "📊 آمار و رکوردها\n\n"
+        "📊 آمار و رکوردها\n"
+        "🖼️ تصاویر خبر\n\n"
 
-        "هدف Vexa اینه که خبرها کوتاه، خوانا و جذاب باشن. 🚀",
+        "هدف Vexa اینه که خبرها سریع، خوانا و متنوع باشن. 🚀",
 
         parse_mode="HTML",
 
@@ -1630,17 +2227,12 @@ async def send_filtered_news(
 
         await update.message.reply_text(
 
-            "❌ فعلاً نتونستم اخبار رو آماده کنم. "
-            "چند دقیقه دیگه دوباره امتحان کن."
+            "❌ فعلاً نتونستم اخبار رو آماده کنم."
 
         )
 
         return
 
-
-    # =====================================================
-    # FILTER
-    # =====================================================
 
     if filter_type == "important":
 
@@ -1668,6 +2260,58 @@ async def send_filtered_news(
             if article.get(
                 "category"
             ) == "transfer"
+
+        ]
+
+
+    elif filter_type == "matches":
+
+        filtered = [
+
+            article
+
+            for article in translated
+
+            if article.get(
+                "category"
+            ) in {
+                "match",
+                "tournament"
+            }
+
+        ]
+
+
+    elif filter_type == "players":
+
+        filtered = [
+
+            article
+
+            for article in translated
+
+            if article.get(
+                "category"
+            ) in {
+                "player",
+                "coach",
+                "injury"
+            }
+
+        ]
+
+
+    elif filter_type == "stats":
+
+        filtered = [
+
+            article
+
+            for article in translated
+
+            if article.get(
+                "category"
+            ) == "record"
 
         ]
 
@@ -1712,6 +2356,12 @@ async def send_filtered_news(
                 article["link"]
             )
 
+            sent_title_keys.add(
+                normalize_title(
+                    article["title"]
+                )
+            )
+
 
         await asyncio.sleep(1)
 
@@ -1724,12 +2374,12 @@ async def send_filtered_news(
 
 
 # =========================================================
-# /NEWS
+# COMMANDS
 # =========================================================
 
 async def news_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    update,
+    context
 ):
 
     await send_filtered_news(
@@ -1739,13 +2389,9 @@ async def news_command(
     )
 
 
-# =========================================================
-# /IMPORTANT
-# =========================================================
-
 async def important_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    update,
+    context
 ):
 
     await send_filtered_news(
@@ -1755,13 +2401,9 @@ async def important_command(
     )
 
 
-# =========================================================
-# /TRANSFERS
-# =========================================================
-
 async def transfers_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    update,
+    context
 ):
 
     await send_filtered_news(
@@ -1771,29 +2413,49 @@ async def transfers_command(
     )
 
 
-# =========================================================
-# /FOOTBALL
-# =========================================================
-
-async def football_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+async def matches_command(
+    update,
+    context
 ):
 
     await send_filtered_news(
         update,
         context,
-        None
+        "matches"
+    )
+
+
+async def players_command(
+    update,
+    context
+):
+
+    await send_filtered_news(
+        update,
+        context,
+        "players"
+    )
+
+
+async def stats_command(
+    update,
+    context
+):
+
+    await send_filtered_news(
+        update,
+        context,
+        "stats"
     )
 
 
 # =========================================================
-# /TESTPOST
+# TEST POST
 # =========================================================
 
 async def testpost(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    update,
+    context
 ):
 
     test_article = {
@@ -1802,11 +2464,11 @@ async def testpost(
             "Vexa",
 
         "title":
-            "تست طراحی جدید Vexa",
+            "تست سیستم جدید انتشار Vexa",
 
         "summary":
-            "اگر این پیام را می‌بینی، اتصال Vexa به کانال "
-            "درست کار می‌کند و سیستم انتشار فعال است. 🤖⚽️",
+            "این یک پیام آزمایشی برای بررسی اتصال بات "
+            "به کانال و سیستم جدید انتشار است. 🤖⚽️",
 
         "link":
             "test",
@@ -1842,7 +2504,7 @@ async def testpost(
 
         await update.message.reply_text(
 
-            "✅ پیام تست با موفقیت در کانال ارسال شد."
+            "✅ پیام تست با موفقیت ارسال شد."
 
         )
 
@@ -1860,71 +2522,53 @@ async def testpost(
 # =========================================================
 
 async def button_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+    update,
+    context
 ):
 
     text = update.message.text
 
 
-    if text == "📰 آخرین اخبار":
+    button_map = {
 
-        await news_command(
+        "📰 آخرین اخبار":
+            news_command,
+
+        "🔥 اخبار مهم":
+            important_command,
+
+        "🔄 نقل‌وانتقالات":
+            transfers_command,
+
+        "🏟️ مسابقات":
+            matches_command,
+
+        "👤 اخبار بازیکنان":
+            players_command,
+
+        "📊 آمار و رکورد":
+            stats_command,
+
+        "🤖 درباره Vexa":
+            about_command,
+
+        "🆘 راهنما":
+            help_command,
+
+    }
+
+
+    handler = button_map.get(
+        text
+    )
+
+
+    if handler:
+
+        await handler(
             update,
             context
         )
-
-        return
-
-
-    if text == "🔥 اخبار مهم":
-
-        await important_command(
-            update,
-            context
-        )
-
-        return
-
-
-    if text == "🔄 نقل‌وانتقالات":
-
-        await transfers_command(
-            update,
-            context
-        )
-
-        return
-
-
-    if text == "⚽ اخبار فوتبال":
-
-        await football_command(
-            update,
-            context
-        )
-
-        return
-
-
-    if text == "🤖 درباره Vexa":
-
-        await about_command(
-            update,
-            context
-        )
-
-        return
-
-
-    if text == "🆘 راهنما":
-
-        await help_command(
-            update,
-            context
-        )
-
-        return
 
 
 # =========================================================
@@ -1932,11 +2576,15 @@ async def button_handler(
 # =========================================================
 
 async def automatic_news(
-    context: ContextTypes.DEFAULT_TYPE
+    context
 ):
 
     print(
-        "Checking for new football news..."
+        "===================================="
+    )
+
+    print(
+        "CHECKING FOR NEW FOOTBALL NEWS..."
     )
 
 
@@ -1967,8 +2615,7 @@ async def automatic_news(
     if not translated:
 
         print(
-            "News translation failed. "
-            "Articles will be retried later."
+            "News processing failed."
         )
 
         return
@@ -1991,6 +2638,12 @@ async def automatic_news(
                 article["link"]
             )
 
+            sent_title_keys.add(
+                normalize_title(
+                    article["title"]
+                )
+            )
+
 
             print(
                 "Posted:",
@@ -2001,12 +2654,21 @@ async def automatic_news(
         await asyncio.sleep(1)
 
 
+    print(
+        "NEWS CHECK FINISHED."
+    )
+
+    print(
+        "===================================="
+    )
+
+
 # =========================================================
 # TELEGRAM COMMAND MENU
 # =========================================================
 
 async def post_init(
-    application: Application
+    application
 ):
 
     commands = [
@@ -2028,12 +2690,22 @@ async def post_init(
 
         BotCommand(
             "transfers",
-            "اخبار نقل‌وانتقالات"
+            "نقل‌وانتقالات"
         ),
 
         BotCommand(
-            "football",
-            "اخبار فوتبال"
+            "matches",
+            "اخبار مسابقات"
+        ),
+
+        BotCommand(
+            "players",
+            "اخبار بازیکنان"
+        ),
+
+        BotCommand(
+            "stats",
+            "آمار و رکوردها"
         ),
 
         BotCommand(
@@ -2048,7 +2720,7 @@ async def post_init(
 
         BotCommand(
             "testpost",
-            "تست ارسال به کانال"
+            "تست ارسال"
         ),
 
     ]
@@ -2079,7 +2751,7 @@ def main():
 
 
     # =====================================================
-    # COMMANDS
+    # COMMAND HANDLERS
     # =====================================================
 
     app.add_handler(
@@ -2116,8 +2788,24 @@ def main():
 
     app.add_handler(
         CommandHandler(
-            "football",
-            football_command
+            "matches",
+            matches_command
+        )
+    )
+
+
+    app.add_handler(
+        CommandHandler(
+            "players",
+            players_command
+        )
+    )
+
+
+    app.add_handler(
+        CommandHandler(
+            "stats",
+            stats_command
         )
     )
 
@@ -2147,14 +2835,21 @@ def main():
 
 
     # =====================================================
-    # BUTTONS
+    # BUTTON HANDLER
     # =====================================================
 
     app.add_handler(
+
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
+
+            filters.TEXT
+            &
+            ~filters.COMMAND,
+
             button_handler
+
         )
+
     )
 
 
@@ -2174,7 +2869,15 @@ def main():
 
 
     print(
-        "Vexa bot is running..."
+        "===================================="
+    )
+
+    print(
+        "VEXA BOT IS RUNNING..."
+    )
+
+    print(
+        "===================================="
     )
 
 
