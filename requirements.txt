@@ -1,2 +1,3 @@
 python-telegram-bot[job-queue]==22.5
 feedparser
+deep-translator==1.11.4
