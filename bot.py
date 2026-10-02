@@ -1,24 +1,29 @@
 import os
-import feedparser
-import html
-import re
 import json
+import re
+import asyncio
+import feedparser
 
 from openai import AsyncOpenAI
-
 from telegram import Update, BotCommand
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-)
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 
-# =========================
-# Settings
-# =========================
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-CHANNEL_ID = "@fcnewsss"
+CHANNEL_USERNAME = "@fcnewsss"
+
+AI_MODEL = "gpt-6-luna"
+
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set!")
+
+if not OPENAI_API_KEY:
+    raise RuntimeError("OPENAI_API_KEY is not set!")
+
+client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
 
 RSS_FEEDS = {
     "BBC Sport": "https://feeds.bbci.co.uk/sport/football/rss.xml",
@@ -26,270 +31,324 @@ RSS_FEEDS = {
     "ESPN": "https://www.espn.com/espn/rss/soccer/news",
 }
 
+
 sent_links = set()
 
-
-# =========================
-# OpenAI
-# =========================
-
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
-if not OPENAI_API_KEY:
-    raise ValueError("OPENAI_API_KEY is not set!")
-
-client = AsyncOpenAI(
-    api_key=OPENAI_API_KEY
-)
-
-AI_MODEL = "gpt-5.6-luna"
-
-
-# =========================
-# Text Cleaning
-# =========================
 
 def clean_text(text):
     if not text:
         return ""
 
-    text = html.unescape(text)
-    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"\s+", " ", text)
 
     return text.strip()
 
 
-def get_summary(article):
-    summary = article.get("summary", "")
+def collect_articles(limit=9):
+    articles = []
 
-    if not summary:
-        summary = article.get("description", "")
+    for source_name, feed_url in RSS_FEEDS.items():
+        try:
+            feed = feedparser.parse(feed_url)
 
-    summary = clean_text(summary)
+            for entry in feed.entries[:6]:
+                title = clean_text(entry.get("title", ""))
 
-    if len(summary) > 700:
-        summary = summary[:700].rsplit(" ", 1)[0] + "..."
+                summary = clean_text(
+                    entry.get("summary", "")
+                    or entry.get("description", "")
+                )
 
-    return summary
+                link = entry.get("link", "")
 
+                if not title or not link:
+                    continue
 
-# =========================
-# AI Translation + Summary
-# =========================
+                articles.append({
+                    "source": source_name,
+                    "title": title,
+                    "summary": summary,
+                    "link": link,
+                })
+
+        except Exception as e:
+            print(f"RSS error ({source_name}): {e}")
+
+    unique = []
+    seen = set()
+
+    for article in articles:
+        if article["link"] in seen:
+            continue
+
+        seen.add(article["link"])
+        unique.append(article)
+
+    return unique[:limit]
+
 
 async def translate_news_with_ai(articles):
-
     if not articles:
         return []
 
     news_text = ""
 
-    for index, article in enumerate(articles, start=1):
-
-        news_text += (
-            f"\n\n--- NEWS {index} ---\n"
-            f"TITLE: {article['title']}\n"
-            f"SUMMARY: {article['summary']}\n"
-        )
+    for i, article in enumerate(articles, start=1):
+        news_text += f"""
+NEWS {i}
+SOURCE: {article["source"]}
+TITLE: {article["title"]}
+SUMMARY: {article["summary"][:2500]}
+"""
 
     prompt = f"""
-تو ویراستار خبری فارسی برای یک کانال فوتبال هستی.
+تو مترجم و ویراستار حرفه‌ای اخبار فوتبال هستی.
 
-خبرهای زیر به زبان انگلیسی هستند.
+خبرهای زیر انگلیسی هستند.
+آن‌ها را برای یک کانال تلگرامی فارسی‌زبان به فارسی روان و طبیعی تبدیل کن.
 
-برای هر خبر:
-
-1. یک تیتر فارسی طبیعی، کوتاه و خبری بنویس.
-2. خلاصه خبر را به فارسی روان و قابل فهم بنویس.
-3. ترجمه تحت‌اللفظی نکن.
-4. اطلاعات جدیدی به خبر اضافه نکن.
-5. نام بازیکنان، باشگاه‌ها، مربیان و مسابقات را درست حفظ کن.
-6. اگر متن ناقص است، چیزی از خودت حدس نزن.
-7. خلاصه هر خبر حداکثر حدود 3 جمله باشد.
-
-حتماً پاسخ را فقط به صورت JSON معتبر بده.
+قوانین:
+- اطلاعات جدید از خودت اضافه نکن.
+- اسم بازیکنان، مربیان، باشگاه‌ها و مسابقات را درست حفظ کن.
+- ترجمه کلمه‌به‌کلمه نباشد.
+- فارسی طبیعی و خبری بنویس.
+- عنوان کوتاه و خبری باشد.
+- خلاصه هر خبر حدود 2 تا 4 جمله باشد.
+- چیزی را حدس نزن.
+- خروجی فقط JSON معتبر باشد.
+- هیچ Markdown یا توضیح اضافه ننویس.
 
 فرمت دقیق:
-
 [
   {{
-    "title": "تیتر فارسی",
+    "title": "عنوان فارسی",
     "summary": "خلاصه فارسی"
   }}
 ]
 
-تعداد آیتم‌های خروجی باید دقیقاً برابر تعداد خبرهای ورودی باشد.
+تعداد خروجی باید دقیقاً برابر تعداد NEWSهای ورودی باشد.
 
 خبرها:
 {news_text}
 """
 
     try:
-
         response = await client.responses.create(
             model=AI_MODEL,
-            input=prompt
+            input=prompt,
         )
 
         result = response.output_text.strip()
 
-        # حذف احتمالی ```json
-        result = re.sub(
-            r"^```json\s*",
-            "",
-            result,
-            flags=re.IGNORECASE
-        )
+        result = re.sub(r"^```json\s*", "", result)
+        result = re.sub(r"\s*```$", "", result)
+        result = result.strip()
 
-        result = re.sub(
-            r"\s*```$",
-            "",
-            result
-        )
+        data = json.loads(result)
 
-        translated = json.loads(result)
-
-        if not isinstance(translated, list):
+        if not isinstance(data, list):
             raise ValueError("AI response is not a list")
 
-        if len(translated) != len(articles):
+        if len(data) != len(articles):
             raise ValueError(
-                "AI returned wrong number of news items"
+                f"Wrong number of articles: {len(data)} / {len(articles)}"
             )
+
+        translated = []
+
+        for article, item in zip(articles, data):
+            title = clean_text(item.get("title", ""))
+            summary = clean_text(item.get("summary", ""))
+
+            if not title:
+                title = article["title"]
+
+            if not summary:
+                summary = article["summary"]
+
+            translated.append({
+                "source": article["source"],
+                "title": title,
+                "summary": summary,
+                "link": article["link"],
+            })
 
         return translated
 
     except Exception as e:
-
         print(
-            f"AI translation error: {e}"
+            f"AI translation error: "
+            f"{type(e).__name__}: {e}"
+        )
+        return []
+
+
+async def post_article(article, bot):
+    text = (
+        "🌍⚽️ <b>خبر جدید فوتبال</b>\n\n"
+        f"📰 <b>{article['title']}</b>\n\n"
+        f"📝 {article['summary']}\n\n"
+        f"🏷 منبع: {article['source']}"
+    )
+
+    try:
+        await bot.send_message(
+            chat_id=CHANNEL_USERNAME,
+            text=text,
+            parse_mode="HTML",
         )
 
-        return None
+        return True
+
+    except Exception as e:
+        print(f"Telegram post error: {e}")
+        return False
 
 
-# =========================
-# Get Latest Articles
-# =========================
-
-def collect_articles():
-
-    articles = []
-
-    for source, url in RSS_FEEDS.items():
-
-        feed = feedparser.parse(url)
-
-        if not feed.entries:
-            continue
-
-        for article in feed.entries[:3]:
-
-            title = clean_text(
-                article.get(
-                    "title",
-                    "بدون عنوان"
-                )
-            )
-
-            summary = get_summary(article)
-
-            link = article.get(
-                "link",
-                ""
-            )
-
-            if not link:
-                continue
-
-            articles.append({
-                "source": source,
-                "title": title,
-                "summary": summary,
-                "link": link,
-            })
-
-    return articles
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "سلام 👋\n\n"
+        "من Vexa هستم 🤖⚽️\n"
+        "ربات اخبار فوتبال فارسی.\n\n"
+        "/news - آخرین اخبار فوتبال\n"
+        "/help - راهنما"
+    )
 
 
-# =========================
-# Create Persian Messages
-# =========================
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "🤖 راهنمای Vexa\n\n"
+        "/start - شروع Vexa\n"
+        "/news - آخرین اخبار فوتبال\n"
+        "/testpost - تست ارسال به کانال\n"
+        "/help - راهنما"
+    )
 
-def build_messages(
-    articles,
-    translated
+
+async def testpost(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    test_article = {
+        "source": "Vexa",
+        "title": "تست ارسال خبر توسط Vexa",
+        "summary": "اگر این پیام را می‌بینی، اتصال Vexa به کانال درست کار می‌کند. 🤖⚽️",
+        "link": "test",
+    }
+
+    success = await post_article(
+        test_article,
+        context.bot
+    )
+
+    if success:
+        await update.message.reply_text(
+            "✅ پیام تست با موفقیت در کانال ارسال شد."
+        )
+    else:
+        await update.message.reply_text(
+            "❌ ارسال پیام تست ناموفق بود."
+        )
+
+
+async def news_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
 ):
+    await update.message.reply_text(
+        "⏳ دارم آخرین اخبار رو به فارسی آماده می‌کنم... 🤖⚽️"
+    )
 
-    messages = []
+    articles = collect_articles(limit=9)
 
-    for article, translation in zip(
-        articles,
-        translated
-    ):
+    if not articles:
+        await update.message.reply_text(
+            "❌ فعلاً خبری از منابع دریافت نکردم."
+        )
+        return
 
-        title = clean_text(
-            translation.get(
-                "title",
-                article["title"]
-            )
+    translated = await translate_news_with_ai(
+        articles
+    )
+
+    if not translated:
+        await update.message.reply_text(
+            "❌ فعلاً نتونستم اخبار رو ترجمه کنم. "
+            "چند دقیقه دیگه دوباره امتحان کن."
+        )
+        return
+
+    posted = 0
+
+    for article in translated:
+        success = await post_article(
+            article,
+            context.bot
         )
 
-        summary = clean_text(
-            translation.get(
-                "summary",
-                ""
-            )
+        if success:
+            posted += 1
+
+        await asyncio.sleep(1)
+
+    await update.message.reply_text(
+        f"✅ {posted} خبر آماده و در کانال ارسال شد. ⚽️🔥"
+    )
+
+
+async def automatic_news(context: ContextTypes.DEFAULT_TYPE):
+    print("Checking for new football news...")
+
+    articles = collect_articles(limit=9)
+
+    if not articles:
+        print("No articles found.")
+        return
+
+    new_articles = [
+        article
+        for article in articles
+        if article["link"] not in sent_links
+    ]
+
+    if not new_articles:
+        print("No new articles.")
+        return
+
+    print(
+        f"Found {len(new_articles)} new articles."
+    )
+
+    translated = await translate_news_with_ai(
+        new_articles
+    )
+
+    if not translated:
+        print(
+            "News translation failed. "
+            "Articles will be retried later."
+        )
+        return
+
+    for article in translated:
+        success = await post_article(
+            article,
+            context.bot
         )
 
-        if summary:
-
-            message = (
-                "🌍🇮🇷⚽️ خبر جدید فوتبال\n\n"
-                f"📰 {title}\n\n"
-                f"📝 {summary}\n\n"
-                f"🏷 منبع: {article['source']}"
+        if success:
+            sent_links.add(article["link"])
+            print(
+                f"Posted: {article['title']}"
             )
 
-        else:
-
-            message = (
-                "🌍🇮🇷⚽️ خبر جدید فوتبال\n\n"
-                f"📰 {title}\n\n"
-                f"🏷 منبع: {article['source']}"
-            )
-
-        messages.append(message)
-
-    return messages
+        await asyncio.sleep(1)
 
 
-# =========================
-# Telegram Command Menu
-# =========================
-
-async def post_init(
-    application: Application
-):
-
+async def post_init(application: Application):
     commands = [
-        BotCommand(
-            "start",
-            "شروع Vexa"
-        ),
-        BotCommand(
-            "news",
-            "آخرین اخبار فوتبال"
-        ),
-        BotCommand(
-            "help",
-            "راهنمای Vexa"
-        ),
-        BotCommand(
-            "testpost",
-            "تست ارسال به کانال"
-        ),
+        BotCommand("start", "شروع Vexa"),
+        BotCommand("news", "آخرین اخبار فوتبال"),
+        BotCommand("help", "راهنمای Vexa"),
+        BotCommand("testpost", "تست ارسال به کانال"),
     ]
 
     await application.bot.set_my_commands(
@@ -297,246 +356,37 @@ async def post_init(
     )
 
 
-# =========================
-# Start
-# =========================
-
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await update.message.reply_text(
-        "سلام! 👋\n"
-        "من Vexa هستم 🤖⚽\n\n"
-        "بات با موفقیت فعال شد! 🚀\n\n"
-        "از منوی پایین می‌تونی دستورات مختلف رو انتخاب کنی."
-    )
-
-
-# =========================
-# Help
-# =========================
-
-async def help_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await update.message.reply_text(
-        "📚 راهنمای Vexa\n\n"
-        "/start - شروع بات\n"
-        "/news - دریافت آخرین اخبار فوتبال\n"
-        "/help - نمایش راهنما\n"
-        "/testpost - تست ارسال پیام به کانال"
-    )
-
-
-# =========================
-# Test Post
-# =========================
-
-async def test_post(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await context.bot.send_message(
-        chat_id=CHANNEL_ID,
-        text="🤖 Vexa با موفقیت به کانال متصل شد! 🚀"
-    )
-
-    await update.message.reply_text(
-        "✅ پیام آزمایشی در کانال ارسال شد."
-    )
-
-
-# =========================
-# /news
-# =========================
-
-async def news(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    await update.message.reply_text(
-        "⏳ دارم آخرین اخبار رو به فارسی آماده می‌کنم... 🤖⚽️"
-    )
-
-    articles = collect_articles()
-
-    if not articles:
-
-        await update.message.reply_text(
-            "❌ فعلاً خبری پیدا نکردم."
-        )
-
-        return
-
-    articles = articles[:9]
-
-    translated = await translate_news_with_ai(
-        articles
-    )
-
-    if translated is None:
-
-        await update.message.reply_text(
-            "❌ فعلاً نتونستم اخبار رو ترجمه کنم. "
-            "چند دقیقه دیگه دوباره امتحان کن."
-        )
-
-        return
-
-    messages = build_messages(
-        articles,
-        translated
-    )
-
-    text = (
-        "🌍🇮🇷 آخرین اخبار فوتبال\n\n"
-        + "\n\n".join(messages)
-    )
-
-    await update.message.reply_text(
-        text
-    )
-
-
-# =========================
-# Automatic News
-# =========================
-
-async def automatic_news(
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    articles = collect_articles()
-
-    new_articles = []
-
-    for article in articles:
-
-        if article["link"] in sent_links:
-            continue
-
-        new_articles.append(article)
-
-    if not new_articles:
-        return
-
-    # حداکثر 9 خبر در هر بررسی
-    new_articles = new_articles[:9]
-
-    translated = await translate_news_with_ai(
-        new_articles
-    )
-
-    if translated is None:
-
-        print(
-            "News translation failed. "
-            "Articles will be retried later."
-        )
-
-        return
-
-    messages = build_messages(
-        new_articles,
-        translated
-    )
-
-    for article, message in zip(
-        new_articles,
-        messages
-    ):
-
-        try:
-
-            await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=message
-            )
-
-            # فقط بعد از ارسال موفق
-            # خبر را به عنوان ارسال‌شده ثبت می‌کنیم
-
-            sent_links.add(
-                article["link"]
-            )
-
-        except Exception as e:
-
-            print(
-                f"Telegram send error: {e}"
-            )
-
-
-# =========================
-# Main
-# =========================
-
 def main():
-
-    bot_token = os.getenv(
-        "BOT_TOKEN"
-    )
-
-    if not bot_token:
-
-        raise ValueError(
-            "BOT_TOKEN is not set!"
-        )
-
     app = (
         Application.builder()
-        .token(bot_token)
+        .token(BOT_TOKEN)
         .post_init(post_init)
         .build()
     )
 
-    # Commands
-
     app.add_handler(
-        CommandHandler(
-            "start",
-            start
-        )
+        CommandHandler("start", start)
     )
 
     app.add_handler(
-        CommandHandler(
-            "help",
-            help_command
-        )
+        CommandHandler("news", news_command)
     )
 
     app.add_handler(
-        CommandHandler(
-            "testpost",
-            test_post
-        )
+        CommandHandler("help", help_command)
     )
 
     app.add_handler(
-        CommandHandler(
-            "news",
-            news
-        )
+        CommandHandler("testpost", testpost)
     )
-
-    # Automatic news every 10 minutes
 
     app.job_queue.run_repeating(
         automatic_news,
         interval=600,
-        first=30
+        first=30,
     )
 
-    print(
-        "Vexa bot is running..."
-    )
+    print("Vexa bot is running...")
 
     app.run_polling()
 
