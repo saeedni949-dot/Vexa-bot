@@ -2,10 +2,17 @@ import os
 import feedparser
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+)
 
 
 RSS_URL = "https://feeds.bbci.co.uk/sport/football/rss.xml"
+CHANNEL_ID = "@fcnewsss"
+
+last_link = None
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -22,13 +29,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start - شروع بات\n"
         "/help - راهنما\n"
         "/testpost - تست ارسال پیام به کانال\n"
-        "/news - دریافت آخرین خبر فوتبال"
+        "/news - دریافت آخرین اخبار فوتبال"
     )
 
 
 async def test_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(
-        chat_id="@fcnewsss",
+        chat_id=CHANNEL_ID,
         text="🤖 Vexa با موفقیت به کانال متصل شد! 🚀"
     )
 
@@ -61,10 +68,13 @@ async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(text)
 
+
+async def automatic_news(context: ContextTypes.DEFAULT_TYPE):
+    global last_link
+
+    feed = feedparser.parse(RSS_URL)
+
     if not feed.entries:
-        await update.message.reply_text(
-            "❌ فعلاً خبری پیدا نکردم."
-        )
         return
 
     article = feed.entries[0]
@@ -72,13 +82,24 @@ async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = article.get("title", "بدون عنوان")
     link = article.get("link", "")
 
+    if not link:
+        return
+
+    if link == last_link:
+        return
+
+    last_link = link
+
     message = (
-        "⚽️ خبر جدید فوتبال\n\n"
+        "🌍⚽️ خبر جدید فوتبال\n\n"
         f"📰 {title}\n\n"
         f"🔗 {link}"
     )
 
-    await update.message.reply_text(message)
+    await context.bot.send_message(
+        chat_id=CHANNEL_ID,
+        text=message
+    )
 
 
 def main():
@@ -93,6 +114,12 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("testpost", test_post))
     app.add_handler(CommandHandler("news", news))
+
+    app.job_queue.run_repeating(
+        automatic_news,
+        interval=600,
+        first=30
+    )
 
     print("Vexa bot is running...")
 
