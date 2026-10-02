@@ -59,7 +59,7 @@ async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = "🌍 آخرین اخبار فوتبال\n\n" + "\n\n".join(messages)
 
-    await update.message.reply_text(text))
+    await update.message.reply_text(text)
 
     if not feed.entries:
         await update.message.reply_text(
