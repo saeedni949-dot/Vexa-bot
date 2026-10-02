@@ -6,8 +6,16 @@ import html
 import feedparser
 
 from openai import AsyncOpenAI
-from telegram import Update, BotCommand
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import (
+    Update,
+    BotCommand,
+    ReplyKeyboardMarkup,
+)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+)
 
 
 # =========================================================
@@ -21,10 +29,10 @@ CHANNEL_USERNAME = "@fcnewsss"
 
 AI_MODEL = "gpt-6-luna"
 
-# تعداد خبرهایی که برای هر بار بررسی دریافت می‌شود
+# تعداد خبر در هر بار بررسی
 MAX_ARTICLES = 9
 
-# فاصله بررسی خودکار اخبار: 10 دقیقه
+# فاصله بررسی خودکار اخبار
 NEWS_INTERVAL = 600
 
 
@@ -60,7 +68,6 @@ RSS_FEEDS = {
 # MEMORY
 # =========================================================
 
-# لینک خبرهایی که با موفقیت ارسال شده‌اند
 sent_links = set()
 
 
@@ -69,24 +76,18 @@ sent_links = set()
 # =========================================================
 
 def clean_text(text):
-    """
-    پاک‌سازی متن RSS و HTML
-    """
 
     if not text:
         return ""
 
-    # Decode HTML entities
     text = html.unescape(text)
 
-    # حذف HTML
     text = re.sub(
         r"<[^>]+>",
         " ",
         text
     )
 
-    # حذف فاصله‌های اضافی
     text = re.sub(
         r"\s+",
         " ",
@@ -97,9 +98,6 @@ def clean_text(text):
 
 
 def limit_text(text, max_length):
-    """
-    محدود کردن طول متن
-    """
 
     if not text:
         return ""
@@ -111,6 +109,186 @@ def limit_text(text, max_length):
         " ",
         1
     )[0] + "..."
+
+
+def escape_html(text):
+
+    if not text:
+        return ""
+
+    return html.escape(
+        str(text),
+        quote=False
+    )
+
+
+# =========================================================
+# IMAGE EXTRACTION
+# =========================================================
+
+def get_article_image(entry):
+
+    """
+    تلاش برای پیدا کردن عکس خبر از RSS.
+    چند فرمت مختلف RSS را بررسی می‌کند.
+    """
+
+    try:
+
+        # ---------------------------------------------
+        # media_content
+        # ---------------------------------------------
+
+        media_content = entry.get(
+            "media_content",
+            []
+        )
+
+        for media in media_content:
+
+            if not isinstance(
+                media,
+                dict
+            ):
+                continue
+
+            url = media.get(
+                "url",
+                ""
+            )
+
+            if url and url.startswith(
+                ("http://", "https://")
+            ):
+
+                return url
+
+
+        # ---------------------------------------------
+        # media_thumbnail
+        # ---------------------------------------------
+
+        thumbnails = entry.get(
+            "media_thumbnail",
+            []
+        )
+
+        for media in thumbnails:
+
+            if not isinstance(
+                media,
+                dict
+            ):
+                continue
+
+            url = media.get(
+                "url",
+                ""
+            )
+
+            if url and url.startswith(
+                ("http://", "https://")
+            ):
+
+                return url
+
+
+        # ---------------------------------------------
+        # enclosures
+        # ---------------------------------------------
+
+        enclosures = entry.get(
+            "enclosures",
+            []
+        )
+
+        for enclosure in enclosures:
+
+            if not isinstance(
+                enclosure,
+                dict
+            ):
+                continue
+
+            url = enclosure.get(
+                "href",
+                ""
+            ) or enclosure.get(
+                "url",
+                ""
+            )
+
+            media_type = enclosure.get(
+                "type",
+                ""
+            ).lower()
+
+            if url and (
+                media_type.startswith("image/")
+                or re.search(
+                    r"\.(jpg|jpeg|png|webp)(\?.*)?$",
+                    url,
+                    re.IGNORECASE
+                )
+            ):
+
+                return url
+
+
+        # ---------------------------------------------
+        # links
+        # ---------------------------------------------
+
+        links = entry.get(
+            "links",
+            []
+        )
+
+        for link in links:
+
+            if not isinstance(
+                link,
+                dict
+            ):
+                continue
+
+            url = link.get(
+                "href",
+                ""
+            )
+
+            media_type = link.get(
+                "type",
+                ""
+            ).lower()
+
+            rel = link.get(
+                "rel",
+                ""
+            ).lower()
+
+            if url and (
+                media_type.startswith("image/")
+                or rel == "enclosure"
+                or re.search(
+                    r"\.(jpg|jpeg|png|webp)(\?.*)?$",
+                    url,
+                    re.IGNORECASE
+                )
+            ):
+
+                return url
+
+
+    except Exception as e:
+
+        print(
+            "IMAGE EXTRACTION ERROR:",
+            repr(e)
+        )
+
+
+    return None
 
 
 # =========================================================
@@ -125,13 +303,14 @@ def collect_articles(limit=MAX_ARTICLES):
 
         try:
 
-            feed = feedparser.parse(feed_url)
+            feed = feedparser.parse(
+                feed_url
+            )
 
             print(
                 f"Reading source: {source_name}"
             )
 
-            # تعداد محدودی از هر منبع
             for entry in feed.entries[:8]:
 
                 title = clean_text(
@@ -161,6 +340,12 @@ def collect_articles(limit=MAX_ARTICLES):
                 if not title or not link:
                     continue
 
+
+                image_url = get_article_image(
+                    entry
+                )
+
+
                 articles.append({
 
                     "source":
@@ -175,7 +360,11 @@ def collect_articles(limit=MAX_ARTICLES):
                     "link":
                         link,
 
+                    "image_url":
+                        image_url,
+
                 })
+
 
         except Exception as e:
 
@@ -192,7 +381,6 @@ def collect_articles(limit=MAX_ARTICLES):
     unique_articles = []
 
     seen_links = set()
-
     seen_titles = set()
 
 
@@ -216,7 +404,6 @@ def collect_articles(limit=MAX_ARTICLES):
 
 
         seen_links.add(link)
-
         seen_titles.add(title_key)
 
         unique_articles.append(
@@ -225,7 +412,7 @@ def collect_articles(limit=MAX_ARTICLES):
 
 
     # =====================================================
-    # REMOVE ALREADY SENT NEWS
+    # REMOVE ALREADY SENT
     # =====================================================
 
     new_articles = [
@@ -261,10 +448,6 @@ async def translate_news_with_ai(
         return []
 
 
-    # =====================================================
-    # BUILD INPUT
-    # =====================================================
-
     news_text = ""
 
 
@@ -291,67 +474,91 @@ ARTICLE SUMMARY:
 """
 
 
-    # =====================================================
-    # PROMPT
-    # =====================================================
-
     prompt = f"""
 تو سردبیر حرفه‌ای یک کانال تلگرامی اخبار فوتبال فارسی هستی.
 
-وظیفه تو این است که خبرهای انگلیسی زیر را به شکل
-یک خبر کوتاه، حرفه‌ای و طبیعی برای مخاطب فارسی‌زبان بازنویسی کنی.
+خبرهای انگلیسی زیر را برای یک کانال فوتبال فارسی
+به شکل طبیعی، جذاب، دقیق و حرفه‌ای بازنویسی کن.
 
-این کار «ترجمه کلمه‌به‌کلمه» نیست.
-باید مفهوم خبر را درست بفهمی و سپس آن را به فارسی
-روان و خبری بنویسی.
+این کار ترجمه کلمه‌به‌کلمه نیست.
 
-قوانین بسیار مهم:
+باید مفهوم خبر را بفهمی و آن را مثل یک خبرنگار ورزشی
+فارسی‌زبان بازنویسی کنی.
+
+قوانین:
 
 1. هیچ اطلاعاتی که در متن اصلی وجود ندارد اضافه نکن.
 
-2. اگر درباره موضوعی مطمئن نیستی، حدس نزن.
+2. اگر اطلاعاتی ناقص است، حدس نزن.
 
-3. اسم بازیکنان، مربیان، باشگاه‌ها، تیم‌های ملی،
-   مسابقات و رقابت‌ها را حفظ کن.
+3. اسم بازیکنان، مربیان، باشگاه‌ها، تیم‌های ملی
+   و مسابقات را حفظ کن.
 
-4. عنوان باید:
-   - کوتاه باشد
-   - خبری باشد
-   - مهم‌ترین نکته خبر را منتقل کند
-   - ترجیحاً حدود 8 تا 15 کلمه باشد
+4. عنوان حدود 8 تا 15 کلمه باشد.
 
-5. خلاصه باید:
-   - حدود 2 تا 3 جمله باشد
-   - مهم‌ترین اطلاعات خبر را منتقل کند
-   - از حاشیه و تکرار دور باشد
-   - برای خواندن سریع در تلگرام مناسب باشد
+5. خلاصه 2 تا 3 جمله باشد.
 
-6. اگر متن RSS ناقص یا کوتاه است،
-   اطلاعاتی از خودت نساز.
+6. از کلیشه‌هایی مثل:
+   «در خبری مهم»
+   «اتفاقی باورنکردنی»
+   «هواداران شوکه شدند»
+   استفاده نکن؛ مگر اینکه واقعاً در خبر وجود داشته باشد.
 
-7. از عبارت‌های کلیشه‌ای مثل
-   «در خبری مهم»،
-   «هواداران فوتبال را شوکه کرد»
-   یا «اتفاقی باورنکردنی»
-   استفاده نکن؛ مگر اینکه خود متن واقعاً چنین چیزی را بیان کند.
+7. لحن حرفه‌ای، ورزشی، روان و بی‌طرف باشد.
 
-8. لحن:
-   حرفه‌ای، ورزشی، روان و بی‌طرف.
+8. خبرها نباید همه با یک لحن و ساختار نوشته شوند.
 
-9. متن را با فارسی طبیعی بنویس، نه ترجمه ماشینی.
+9. نوع هر خبر را مشخص کن.
 
-10. خروجی فقط JSON معتبر باشد.
+دسته‌بندی‌های مجاز:
 
-11. هیچ Markdown، توضیح اضافی یا متن خارج از JSON ننویس.
+breaking
+transfer
+match
+player
+coach
+injury
+record
+tournament
+other
 
-12. تعداد آیتم‌های خروجی باید دقیقاً برابر تعداد خبرهای ورودی باشد.
+10. میزان اهمیت خبر را مشخص کن:
+
+high
+medium
+low
+
+11. برای هر خبر یک emoji مناسب انتخاب کن.
+
+12. برای هر خبر یک سبک انتشار انتخاب کن:
+
+classic
+breaking
+transfer
+match
+player
+stats
+
+13. سبک را بر اساس خود خبر انتخاب کن.
+همه خبرها را classic نکن.
+
+14. خروجی فقط JSON معتبر باشد.
+
+15. هیچ Markdown یا توضیح اضافه ننویس.
+
+16. تعداد آیتم‌های خروجی باید دقیقاً برابر
+تعداد خبرهای ورودی باشد.
 
 فرمت دقیق:
 
 [
   {{
-    "title": "عنوان فارسی خبر",
-    "summary": "خلاصه فارسی خبر"
+    "title": "عنوان فارسی",
+    "summary": "خلاصه فارسی",
+    "category": "transfer",
+    "importance": "high",
+    "emoji": "🔥",
+    "style": "transfer"
   }}
 ]
 
@@ -360,10 +567,6 @@ ARTICLE SUMMARY:
 {news_text}
 """
 
-
-    # =====================================================
-    # OPENAI REQUEST
-    # =====================================================
 
     try:
 
@@ -400,7 +603,7 @@ ARTICLE SUMMARY:
 
 
         # =================================================
-        # CLEAN POSSIBLE MARKDOWN
+        # CLEAN MARKDOWN
         # =================================================
 
         result = re.sub(
@@ -494,19 +697,90 @@ ARTICLE SUMMARY:
             )
 
 
-            # Fallback
-            if not title:
+            category = clean_text(
+                item.get(
+                    "category",
+                    "other"
+                )
+            ).lower()
 
-                title = article[
-                    "title"
-                ]
+
+            importance = clean_text(
+                item.get(
+                    "importance",
+                    "medium"
+                )
+            ).lower()
+
+
+            emoji = clean_text(
+                item.get(
+                    "emoji",
+                    "⚽️"
+                )
+            )
+
+
+            style = clean_text(
+                item.get(
+                    "style",
+                    "classic"
+                )
+            ).lower()
+
+
+            # ---------------------------------------------
+            # VALIDATION
+            # ---------------------------------------------
+
+            valid_categories = {
+                "breaking",
+                "transfer",
+                "match",
+                "player",
+                "coach",
+                "injury",
+                "record",
+                "tournament",
+                "other",
+            }
+
+
+            valid_importance = {
+                "high",
+                "medium",
+                "low",
+            }
+
+
+            valid_styles = {
+                "classic",
+                "breaking",
+                "transfer",
+                "match",
+                "player",
+                "stats",
+            }
+
+
+            if category not in valid_categories:
+                category = "other"
+
+
+            if importance not in valid_importance:
+                importance = "medium"
+
+
+            if style not in valid_styles:
+                style = "classic"
+
+
+            if not title:
+                title = article["title"]
 
 
             if not summary:
-
-                summary = article[
-                    "summary"
-                ]
+                summary = article["summary"]
 
 
             translated.append({
@@ -522,6 +796,23 @@ ARTICLE SUMMARY:
 
                 "link":
                     article["link"],
+
+                "image_url":
+                    article.get(
+                        "image_url"
+                    ),
+
+                "category":
+                    category,
+
+                "importance":
+                    importance,
+
+                "emoji":
+                    emoji,
+
+                "style":
+                    style,
 
             })
 
@@ -561,6 +852,160 @@ ARTICLE SUMMARY:
 
 
 # =========================================================
+# NEWS DESIGN
+# =========================================================
+
+def build_news_text(article):
+
+    title = escape_html(
+        clean_text(
+            article["title"]
+        )
+    )
+
+    summary = escape_html(
+        clean_text(
+            article["summary"]
+        )
+    )
+
+    source = escape_html(
+        clean_text(
+            article["source"]
+        )
+    )
+
+    emoji = escape_html(
+        article.get(
+            "emoji",
+            "⚽️"
+        )
+    )
+
+    category = article.get(
+        "category",
+        "other"
+    )
+
+    style = article.get(
+        "style",
+        "classic"
+    )
+
+
+    # =====================================================
+    # BREAKING
+    # =====================================================
+
+    if style == "breaking":
+
+        return (
+
+            f"🚨 <b>خبر فوری</b>\n\n"
+
+            f"{emoji} <b>{title}</b>\n\n"
+
+            f"📝 {summary}\n\n"
+
+            f"🏷 <i>{source}</i>"
+
+        )
+
+
+    # =====================================================
+    # TRANSFER
+    # =====================================================
+
+    if style == "transfer":
+
+        return (
+
+            f"🔄 <b>نقل‌وانتقالات</b>\n\n"
+
+            f"{emoji} <b>{title}</b>\n\n"
+
+            f"📝 {summary}\n\n"
+
+            f"🏷 <i>{source}</i>"
+
+        )
+
+
+    # =====================================================
+    # MATCH
+    # =====================================================
+
+    if style == "match":
+
+        return (
+
+            f"🏟️ <b>گزارش فوتبال</b>\n\n"
+
+            f"{emoji} <b>{title}</b>\n\n"
+
+            f"📝 {summary}\n\n"
+
+            f"🏷 <i>{source}</i>"
+
+        )
+
+
+    # =====================================================
+    # PLAYER
+    # =====================================================
+
+    if style == "player":
+
+        return (
+
+            f"👤 <b>دنیای بازیکنان</b>\n\n"
+
+            f"{emoji} <b>{title}</b>\n\n"
+
+            f"📝 {summary}\n\n"
+
+            f"🏷 <i>{source}</i>"
+
+        )
+
+
+    # =====================================================
+    # STATS
+    # =====================================================
+
+    if style == "stats":
+
+        return (
+
+            f"📊 <b>آمار و رکورد</b>\n\n"
+
+            f"{emoji} <b>{title}</b>\n\n"
+
+            f"📝 {summary}\n\n"
+
+            f"🏷 <i>{source}</i>"
+
+        )
+
+
+    # =====================================================
+    # CLASSIC
+    # =====================================================
+
+    return (
+
+        f"🌍⚽️ <b>خبر جدید فوتبال</b>\n\n"
+
+        f"{emoji} <b>{title}</b>\n\n"
+
+        f"📝 {summary}\n\n"
+
+        f"🏷 <i>{source}</i>"
+
+    )
+
+
+# =========================================================
 # TELEGRAM POST
 # =========================================================
 
@@ -569,33 +1014,61 @@ async def post_article(
     bot
 ):
 
-    title = clean_text(
-        article["title"]
-    )
-
-    summary = clean_text(
-        article["summary"]
-    )
-
-    source = clean_text(
-        article["source"]
+    text = build_news_text(
+        article
     )
 
 
-    text = (
-
-        "🌍⚽️ <b>خبر جدید فوتبال</b>\n\n"
-
-        f"📰 <b>{title}</b>\n\n"
-
-        f"📝 {summary}\n\n"
-
-        f"🏷 منبع: {source}"
-
+    image_url = article.get(
+        "image_url"
     )
 
 
     try:
+
+        # =================================================
+        # TRY PHOTO
+        # =================================================
+
+        if image_url:
+
+            try:
+
+                await bot.send_photo(
+
+                    chat_id=CHANNEL_USERNAME,
+
+                    photo=image_url,
+
+                    caption=text,
+
+                    parse_mode="HTML",
+
+                )
+
+                print(
+                    "Posted with image:",
+                    article["title"]
+                )
+
+                return True
+
+
+            except Exception as image_error:
+
+                print(
+                    "IMAGE POST FAILED:",
+                    repr(image_error)
+                )
+
+                print(
+                    "Falling back to text post..."
+                )
+
+
+        # =================================================
+        # TEXT FALLBACK
+        # =================================================
 
         await bot.send_message(
 
@@ -605,6 +1078,12 @@ async def post_article(
 
             parse_mode="HTML",
 
+        )
+
+
+        print(
+            "Posted as text:",
+            article["title"]
         )
 
 
@@ -622,6 +1101,37 @@ async def post_article(
 
 
 # =========================================================
+# KEYBOARD
+# =========================================================
+
+def get_main_keyboard():
+
+    keyboard = [
+
+        [
+            "📰 آخرین اخبار",
+            "🔥 اخبار مهم",
+        ],
+
+        [
+            "🔄 نقل‌وانتقالات",
+            "⚽ اخبار فوتبال",
+        ],
+
+        [
+            "🤖 درباره Vexa",
+            "🆘 راهنما",
+        ],
+
+    ]
+
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True
+    )
+
+
+# =========================================================
 # /START
 # =========================================================
 
@@ -632,15 +1142,25 @@ async def start(
 
     await update.message.reply_text(
 
-        "سلام 👋\n\n"
+        "سلام 👋🔥\n\n"
 
-        "من Vexa هستم 🤖⚽️\n"
+        "من <b>Vexa</b> هستم 🤖⚽️\n"
 
-        "ربات اخبار فوتبال فارسی.\n\n"
+        "دستیار اخبار فوتبال فارسی.\n\n"
 
-        "📰 /news - آخرین اخبار فوتبال\n"
+        "از منوی پایین می‌تونی بخش موردنظرت رو انتخاب کنی "
+        "یا از دستورات استفاده کنی.\n\n"
 
-        "ℹ️ /help - راهنما"
+        "📰 آخرین اخبار\n"
+        "🔥 اخبار مهم\n"
+        "🔄 نقل‌وانتقالات\n"
+        "⚽ اخبار فوتبال\n\n"
+
+        "بریم برای خبرهای جدید! 🚀",
+
+        parse_mode="HTML",
+
+        reply_markup=get_main_keyboard()
 
     )
 
@@ -658,16 +1178,261 @@ async def help_command(
 
         "🤖 <b>راهنمای Vexa</b>\n\n"
 
-        "/start - شروع Vexa\n"
+        "📰 /news\n"
+        "آخرین اخبار فوتبال\n\n"
 
-        "/news - آخرین اخبار فوتبال\n"
+        "🔥 /important\n"
+        "خبرهای مهم‌تر\n\n"
 
-        "/testpost - تست ارسال به کانال\n"
+        "🔄 /transfers\n"
+        "اخبار نقل‌وانتقالات\n\n"
 
-        "/help - راهنما",
+        "⚽ /football\n"
+        "اخبار فوتبال\n\n"
 
-        parse_mode="HTML"
+        "🧪 /testpost\n"
+        "تست ارسال به کانال\n\n"
 
+        "ℹ️ /help\n"
+        "نمایش راهنما",
+
+        parse_mode="HTML",
+
+        reply_markup=get_main_keyboard()
+
+    )
+
+
+# =========================================================
+# ABOUT
+# =========================================================
+
+async def about_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await update.message.reply_text(
+
+        "🤖 <b>Vexa</b>\n\n"
+
+        "یک ربات خبری فوتبال است که اخبار منابع مختلف "
+        "را جمع‌آوری می‌کند، با کمک هوش مصنوعی بازنویسی "
+        "می‌کند و به کانال @fcnewsss ارسال می‌کند. ⚽️🔥\n\n"
+
+        "📰 اخبار فوتبال\n"
+        "🔄 نقل‌وانتقالات\n"
+        "🏟️ مسابقات\n"
+        "👤 بازیکنان\n"
+        "📊 آمار و رکوردها\n\n"
+
+        "هدف Vexa اینه که خبرها کوتاه، خوانا و جذاب باشن. 🚀",
+
+        parse_mode="HTML",
+
+        reply_markup=get_main_keyboard()
+
+    )
+
+
+# =========================================================
+# FILTERED NEWS
+# =========================================================
+
+async def send_filtered_news(
+    update,
+    context,
+    filter_type=None
+):
+
+    await update.message.reply_text(
+
+        "⏳ دارم خبرهای جدید رو بررسی می‌کنم... "
+        "🤖⚽️"
+
+    )
+
+
+    articles = collect_articles(
+        limit=MAX_ARTICLES
+    )
+
+
+    if not articles:
+
+        await update.message.reply_text(
+
+            "❌ فعلاً خبر جدیدی پیدا نکردم."
+
+        )
+
+        return
+
+
+    translated = await translate_news_with_ai(
+        articles
+    )
+
+
+    if not translated:
+
+        await update.message.reply_text(
+
+            "❌ فعلاً نتونستم اخبار رو آماده کنم. "
+            "چند دقیقه دیگه دوباره امتحان کن."
+
+        )
+
+        return
+
+
+    # =====================================================
+    # FILTER
+    # =====================================================
+
+    if filter_type == "important":
+
+        filtered = [
+
+            article
+
+            for article in translated
+
+            if article.get(
+                "importance"
+            ) == "high"
+
+        ]
+
+
+    elif filter_type == "transfers":
+
+        filtered = [
+
+            article
+
+            for article in translated
+
+            if article.get(
+                "category"
+            ) == "transfer"
+
+        ]
+
+
+    else:
+
+        filtered = translated
+
+
+    # اگر فیلتر چیزی پیدا نکرد
+    if not filtered:
+
+        await update.message.reply_text(
+
+            "ℹ️ در این بررسی خبر مناسبی برای این بخش "
+            "پیدا نشد.\n\n"
+            "چند دقیقه دیگه دوباره امتحان کن. ⚽️"
+
+        )
+
+        return
+
+
+    posted = 0
+
+
+    for article in filtered:
+
+        success = await post_article(
+
+            article,
+
+            context.bot
+
+        )
+
+
+        if success:
+
+            posted += 1
+
+            sent_links.add(
+                article["link"]
+            )
+
+
+        await asyncio.sleep(1)
+
+
+    await update.message.reply_text(
+
+        f"✅ {posted} خبر ارسال شد. ⚽️🔥"
+
+    )
+
+
+# =========================================================
+# /NEWS
+# =========================================================
+
+async def news_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await send_filtered_news(
+        update,
+        context,
+        None
+    )
+
+
+# =========================================================
+# /IMPORTANT
+# =========================================================
+
+async def important_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await send_filtered_news(
+        update,
+        context,
+        "important"
+    )
+
+
+# =========================================================
+# /TRANSFERS
+# =========================================================
+
+async def transfers_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await send_filtered_news(
+        update,
+        context,
+        "transfers"
+    )
+
+
+# =========================================================
+# /FOOTBALL
+# =========================================================
+
+async def football_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    await send_filtered_news(
+        update,
+        context,
+        None
     )
 
 
@@ -686,14 +1451,29 @@ async def testpost(
             "Vexa",
 
         "title":
-            "تست ارسال خبر توسط Vexa",
+            "تست طراحی جدید Vexa",
 
         "summary":
-            "اگر این پیام را می‌بینی، "
-            "اتصال Vexa به کانال درست کار می‌کند. 🤖⚽️",
+            "اگر این پیام را می‌بینی، اتصال Vexa به کانال "
+            "درست کار می‌کند و سیستم انتشار فعال است. 🤖⚽️",
 
         "link":
             "test",
+
+        "image_url":
+            None,
+
+        "category":
+            "other",
+
+        "importance":
+            "medium",
+
+        "emoji":
+            "🧪",
+
+        "style":
+            "classic",
 
     }
 
@@ -725,89 +1505,75 @@ async def testpost(
 
 
 # =========================================================
-# /NEWS
+# TEXT BUTTON HANDLER
 # =========================================================
 
-async def news_command(
+async def button_handler(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    await update.message.reply_text(
-
-        "⏳ دارم آخرین اخبار رو "
-        "با کیفیت بهتر آماده می‌کنم... 🤖⚽️"
-
-    )
+    text = update.message.text
 
 
-    articles = collect_articles(
-        limit=MAX_ARTICLES
-    )
+    if text == "📰 آخرین اخبار":
 
-
-    if not articles:
-
-        await update.message.reply_text(
-
-            "❌ فعلاً خبر جدیدی از منابع دریافت نکردم."
-
+        await news_command(
+            update,
+            context
         )
 
         return
 
 
-    translated = (
-        await translate_news_with_ai(
-            articles
-        )
-    )
+    if text == "🔥 اخبار مهم":
 
-
-    if not translated:
-
-        await update.message.reply_text(
-
-            "❌ فعلاً نتونستم اخبار رو آماده کنم. "
-            "چند دقیقه دیگه دوباره امتحان کن."
-
+        await important_command(
+            update,
+            context
         )
 
         return
 
 
-    posted = 0
+    if text == "🔄 نقل‌وانتقالات":
 
-
-    for article in translated:
-
-        success = await post_article(
-
-            article,
-
-            context.bot
-
+        await transfers_command(
+            update,
+            context
         )
 
-
-        if success:
-
-            posted += 1
-
-            sent_links.add(
-                article["link"]
-            )
+        return
 
 
-        await asyncio.sleep(1)
+    if text == "⚽ اخبار فوتبال":
+
+        await football_command(
+            update,
+            context
+        )
+
+        return
 
 
-    await update.message.reply_text(
+    if text == "🤖 درباره Vexa":
 
-        f"✅ {posted} خبر با موفقیت "
-        "آماده و در کانال ارسال شد. ⚽️🔥"
+        await about_command(
+            update,
+            context
+        )
 
-    )
+        return
+
+
+    if text == "🆘 راهنما":
+
+        await help_command(
+            update,
+            context
+        )
+
+        return
 
 
 # =========================================================
@@ -842,10 +1608,8 @@ async def automatic_news(
     )
 
 
-    translated = (
-        await translate_news_with_ai(
-            articles
-        )
+    translated = await translate_news_with_ai(
+        articles
     )
 
 
@@ -906,6 +1670,26 @@ async def post_init(
         ),
 
         BotCommand(
+            "important",
+            "اخبار مهم"
+        ),
+
+        BotCommand(
+            "transfers",
+            "اخبار نقل‌وانتقالات"
+        ),
+
+        BotCommand(
+            "football",
+            "اخبار فوتبال"
+        ),
+
+        BotCommand(
+            "about",
+            "درباره Vexa"
+        ),
+
+        BotCommand(
             "help",
             "راهنمای Vexa"
         ),
@@ -942,6 +1726,10 @@ def main():
     )
 
 
+    # ---------------------------------------------
+    # COMMANDS
+    # ---------------------------------------------
+
     app.add_handler(
         CommandHandler(
             "start",
@@ -954,6 +1742,38 @@ def main():
         CommandHandler(
             "news",
             news_command
+        )
+    )
+
+
+    app.add_handler(
+        CommandHandler(
+            "important",
+            important_command
+        )
+    )
+
+
+    app.add_handler(
+        CommandHandler(
+            "transfers",
+            transfers_command
+        )
+    )
+
+
+    app.add_handler(
+        CommandHandler(
+            "football",
+            football_command
+        )
+    )
+
+
+    app.add_handler(
+        CommandHandler(
+            "about",
+            about_command
         )
     )
 
@@ -974,9 +1794,23 @@ def main():
     )
 
 
-    # =====================================================
+    # ---------------------------------------------
+    # BUTTONS
+    # ---------------------------------------------
+
+    from telegram.ext import MessageHandler, filters
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            button_handler
+        )
+    )
+
+
+    # ---------------------------------------------
     # AUTOMATIC NEWS
-    # =====================================================
+    # ---------------------------------------------
 
     app.job_queue.run_repeating(
 
