@@ -24,7 +24,7 @@ RSS_FEEDS = {
 sent_links = set()
 
 translator = GoogleTranslator(
-    source="auto",
+    source="en",
     target="fa"
 )
 
