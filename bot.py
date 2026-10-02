@@ -9,10 +9,15 @@ from telegram.ext import (
 )
 
 
-RSS_URL = "https://feeds.bbci.co.uk/sport/football/rss.xml"
 CHANNEL_ID = "@fcnewsss"
 
-last_link = None
+RSS_FEEDS = {
+    "BBC Sport": "https://feeds.bbci.co.uk/sport/football/rss.xml",
+    "The Guardian": "https://www.theguardian.com/football/rss",
+    "ESPN": "https://www.espn.com/espn/rss/soccer/news",
+}
+
+sent_links = set()
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -45,61 +50,60 @@ async def test_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def news(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    feed = feedparser.parse(RSS_URL)
+    messages = []
 
-    if not feed.entries:
+    for source, url in RSS_FEEDS.items():
+        feed = feedparser.parse(url)
+
+        for article in feed.entries[:3]:
+            title = article.get("title", "بدون عنوان")
+            link = article.get("link", "")
+
+            messages.append(
+                f"⚽️ {title}\n"
+                f"📰 منبع: {source}"
+            )
+
+    if not messages:
         await update.message.reply_text(
             "❌ فعلاً خبری پیدا نکردم."
         )
         return
 
-    messages = []
-
-    for article in feed.entries[:5]:
-        title = article.get("title", "بدون عنوان")
-        link = article.get("link", "")
-
-        messages.append(
-            f"⚽️ {title}\n"
-            f"🔗 {link}"
-        )
-
-    text = "🌍 آخرین اخبار فوتبال\n\n" + "\n\n".join(messages)
+    text = "🌍 آخرین اخبار فوتبال\n\n" + "\n\n".join(messages[:9])
 
     await update.message.reply_text(text)
 
 
 async def automatic_news(context: ContextTypes.DEFAULT_TYPE):
-    global last_link
+    for source, url in RSS_FEEDS.items():
+        feed = feedparser.parse(url)
 
-    feed = feedparser.parse(RSS_URL)
+        if not feed.entries:
+            continue
 
-    if not feed.entries:
-        return
+        for article in feed.entries[:3]:
+            title = article.get("title", "بدون عنوان")
+            link = article.get("link", "")
 
-    article = feed.entries[0]
+            if not link:
+                continue
 
-    title = article.get("title", "بدون عنوان")
-    link = article.get("link", "")
+            if link in sent_links:
+                continue
 
-    if not link:
-        return
+            sent_links.add(link)
 
-    if link == last_link:
-        return
+            message = (
+                "🌍⚽️ خبر جدید فوتبال\n\n"
+                f"📰 {title}\n\n"
+                f"🏷 منبع: {source}"
+            )
 
-    last_link = link
-
-    message = (
-        "🌍⚽️ خبر جدید فوتبال\n\n"
-        f"📰 {title}\n\n"
-        f"🔗 {link}"
-    )
-
-    await context.bot.send_message(
-        chat_id=CHANNEL_ID,
-        text=message
-    )
+            await context.bot.send_message(
+                chat_id=CHANNEL_ID,
+                text=message
+            )
 
 
 def main():
