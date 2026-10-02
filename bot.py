@@ -15,7 +15,18 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "دستورات موجود:\n"
         "/start - شروع بات\n"
-        "/help - راهنما"
+        "/help - راهنما\n"
+        "/testpost - تست ارسال پیام به کانال"
+    )
+
+
+async def test_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_message(
+        chat_id="@fcnewsss",
+        text="🤖 Vexa با موفقیت به کانال متصل شد! 🚀"
+    )
+    await update.message.reply_text(
+        "✅ پیام آزمایشی در کانال ارسال شد."
     )
 
 
@@ -29,6 +40,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("testpost", test_post))
 
     print("Vexa bot is running...")
     app.run_polling()
