@@ -2,6 +2,7 @@ import os
 import feedparser
 import html
 import re
+import time
 
 from deep_translator import GoogleTranslator
 
@@ -23,11 +24,10 @@ RSS_FEEDS = {
 
 sent_links = set()
 
-translator = GoogleTranslator(
-    source="en",
-    target="fa"
-)
 
+# =========================
+# Text Cleaning
+# =========================
 
 def clean_text(text):
     if not text:
@@ -38,19 +38,6 @@ def clean_text(text):
     text = re.sub(r"\s+", " ", text)
 
     return text.strip()
-
-
-def translate_to_persian(text):
-    if not text:
-        return ""
-
-    try:
-        translated = translator.translate(text)
-        return clean_text(translated)
-
-    except Exception as e:
-        print(f"Translation error: {e}")
-        return text
 
 
 def get_summary(article):
@@ -67,15 +54,32 @@ def get_summary(article):
     return summary
 
 
-def translate_news(title, summary):
-    persian_title = translate_to_persian(title)
+# =========================
+# Batch Translation
+# =========================
 
-    if summary:
-        persian_summary = translate_to_persian(summary)
-    else:
-        persian_summary = ""
+def translate_batch(texts):
+    if not texts:
+        return []
 
-    return persian_title, persian_summary
+    try:
+        translator = GoogleTranslator(
+            source="en",
+            target="fa"
+        )
+
+        results = translator.translate_batch(texts)
+
+        return [
+            clean_text(result) if result else original
+            for result, original in zip(results, texts)
+        ]
+
+    except Exception as e:
+        print(f"Translation error: {e}")
+
+        # اگر ترجمه شکست خورد، متن اصلی برگردانده می‌شود
+        return texts
 
 
 # =========================
@@ -95,7 +99,7 @@ async def post_init(application: Application):
 
 
 # =========================
-# Commands
+# Start
 # =========================
 
 async def start(
@@ -111,6 +115,10 @@ async def start(
     )
 
 
+# =========================
+# Help
+# =========================
+
 async def help_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
@@ -124,6 +132,10 @@ async def help_command(
         "/testpost - تست ارسال پیام به کانال"
     )
 
+
+# =========================
+# Test Post
+# =========================
 
 async def test_post(
     update: Update,
@@ -149,8 +161,9 @@ async def news(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    messages = []
+    articles = []
 
+    # دریافت اخبار
     for source, url in RSS_FEEDS.items():
 
         feed = feedparser.parse(url)
@@ -169,29 +182,13 @@ async def news(
 
             summary = get_summary(article)
 
-            persian_title, persian_summary = translate_news(
-                title,
-                summary
-            )
+            articles.append({
+                "source": source,
+                "title": title,
+                "summary": summary,
+            })
 
-            if persian_summary:
-
-                message = (
-                    f"⚽️ {persian_title}\n\n"
-                    f"📝 {persian_summary}\n\n"
-                    f"🏷 منبع: {source}"
-                )
-
-            else:
-
-                message = (
-                    f"⚽️ {persian_title}\n\n"
-                    f"🏷 منبع: {source}"
-                )
-
-            messages.append(message)
-
-    if not messages:
+    if not articles:
 
         await update.message.reply_text(
             "❌ فعلاً خبری پیدا نکردم."
@@ -199,12 +196,72 @@ async def news(
 
         return
 
-    text = (
-        "🌍🇮🇷 آخرین اخبار فوتبال\n\n"
-        + "\n\n".join(messages[:9])
+    # ساخت لیست برای ترجمه
+    translation_texts = []
+
+    for article in articles[:9]:
+
+        translation_texts.append(
+            article["title"]
+        )
+
+        if article["summary"]:
+            translation_texts.append(
+                article["summary"]
+            )
+
+    # ترجمه دسته‌ای
+    translated = translate_batch(
+        translation_texts
     )
 
-    await update.message.reply_text(text)
+    # ساخت خبرهای فارسی
+    translated_index = 0
+    messages = []
+
+    for article in articles[:9]:
+
+        persian_title = translated[
+            translated_index
+        ]
+
+        translated_index += 1
+
+        persian_summary = ""
+
+        if article["summary"]:
+
+            persian_summary = translated[
+                translated_index
+            ]
+
+            translated_index += 1
+
+        if persian_summary:
+
+            message = (
+                f"⚽️ {persian_title}\n\n"
+                f"📝 {persian_summary}\n\n"
+                f"🏷 منبع: {article['source']}"
+            )
+
+        else:
+
+            message = (
+                f"⚽️ {persian_title}\n\n"
+                f"🏷 منبع: {article['source']}"
+            )
+
+        messages.append(message)
+
+    text = (
+        "🌍🇮🇷 آخرین اخبار فوتبال\n\n"
+        + "\n\n".join(messages)
+    )
+
+    await update.message.reply_text(
+        text
+    )
 
 
 # =========================
@@ -215,6 +272,9 @@ async def automatic_news(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
+    articles = []
+
+    # دریافت اخبار جدید
     for source, url in RSS_FEEDS.items():
 
         feed = feedparser.parse(url)
@@ -231,46 +291,101 @@ async def automatic_news(
                 )
             )
 
-            link = article.get("link", "")
+            link = article.get(
+                "link",
+                ""
+            )
 
             if not link:
                 continue
 
-            # جلوگیری از ارسال خبر تکراری
             if link in sent_links:
                 continue
 
-            sent_links.add(link)
-
             summary = get_summary(article)
 
-            # ترجمه به فارسی
-            persian_title, persian_summary = translate_news(
-                title,
-                summary
+            articles.append({
+                "source": source,
+                "title": title,
+                "summary": summary,
+                "link": link,
+            })
+
+    if not articles:
+        return
+
+    # فقط خبرهای جدید
+    articles = articles[:9]
+
+    # ساخت متن‌های ترجمه
+    translation_texts = []
+
+    for article in articles:
+
+        translation_texts.append(
+            article["title"]
+        )
+
+        if article["summary"]:
+
+            translation_texts.append(
+                article["summary"]
             )
 
-            if persian_summary:
+    # ترجمه دسته‌ای
+    translated = translate_batch(
+        translation_texts
+    )
 
-                message = (
-                    "🌍🇮🇷⚽️ خبر جدید فوتبال\n\n"
-                    f"📰 {persian_title}\n\n"
-                    f"📝 {persian_summary}\n\n"
-                    f"🏷 منبع: {source}"
-                )
+    translated_index = 0
 
-            else:
+    for article in articles:
 
-                message = (
-                    "🌍🇮🇷⚽️ خبر جدید فوتبال\n\n"
-                    f"📰 {persian_title}\n\n"
-                    f"🏷 منبع: {source}"
-                )
+        # اینجا خبر به عنوان پردازش‌شده ثبت می‌شود
+        sent_links.add(
+            article["link"]
+        )
 
-            await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=message
+        persian_title = translated[
+            translated_index
+        ]
+
+        translated_index += 1
+
+        persian_summary = ""
+
+        if article["summary"]:
+
+            persian_summary = translated[
+                translated_index
+            ]
+
+            translated_index += 1
+
+        if persian_summary:
+
+            message = (
+                "🌍🇮🇷⚽️ خبر جدید فوتبال\n\n"
+                f"📰 {persian_title}\n\n"
+                f"📝 {persian_summary}\n\n"
+                f"🏷 منبع: {article['source']}"
             )
+
+        else:
+
+            message = (
+                "🌍🇮🇷⚽️ خبر جدید فوتبال\n\n"
+                f"📰 {persian_title}\n\n"
+                f"🏷 منبع: {article['source']}"
+            )
+
+        await context.bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=message
+        )
+
+        # فاصله کوتاه بین ارسال‌های تلگرام
+        time.sleep(1)
 
 
 # =========================
@@ -279,9 +394,12 @@ async def automatic_news(
 
 def main():
 
-    token = os.getenv("BOT_TOKEN")
+    token = os.getenv(
+        "BOT_TOKEN"
+    )
 
     if not token:
+
         raise ValueError(
             "BOT_TOKEN is not set!"
         )
@@ -323,7 +441,8 @@ def main():
         )
     )
 
-    # اخبار خودکار هر ۱۰ دقیقه
+    # Automatic news
+    # هر ۱۰ دقیقه
 
     app.job_queue.run_repeating(
         automatic_news,
