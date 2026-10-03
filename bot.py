@@ -1,23 +1,27 @@
 import asyncio
 import difflib
 import hashlib
+import html
 import json
 import os
 import re
 import urllib.parse
+import urllib.request
 from datetime import datetime, time
+from io import BytesIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import feedparser
 from openai import AsyncOpenAI
+
 from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
+    InputFile,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     Update,
 )
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -38,8 +42,8 @@ CHANNEL_USERNAME = "@fcnewsss"
 
 AI_MODEL = "gpt-6-luna"
 
-NEWS_INTERVAL = 600
-FIRST_NEWS_DELAY = 30
+NEWS_INTERVAL = 600          # هر 10 دقیقه
+FIRST_NEWS_DELAY = 30        # اولین بررسی 30 ثانیه بعد از روشن شدن
 
 DAILY_DIGEST_HOUR = 21
 DAILY_DIGEST_MINUTE = 0
@@ -47,10 +51,12 @@ DAILY_DIGEST_MINUTE = 0
 LOCAL_TZ = ZoneInfo("Europe/Budapest")
 
 STATE_FILE = Path("vexa_state.json")
-IMAGE_CACHE_DIR = Path("vexa_images")
 
 MAX_ARTICLES = 8
 MAX_RECENT_ARTICLES = 200
+
+# حداکثر حجم عکس برای دانلود
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
 
 
 # =========================================================
@@ -91,7 +97,7 @@ openai_client = None
 
 
 # =========================================================
-# BASIC HELPERS
+# TIME / TEXT HELPERS
 # =========================================================
 
 def now_local():
@@ -103,6 +109,41 @@ def safe_text(value):
         return ""
 
     return str(value).strip()
+
+
+def clean_html_text(value):
+    if not value:
+        return ""
+
+    value = html.unescape(str(value))
+
+    value = re.sub(
+        r"<br\s*/?>",
+        "\n",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    value = re.sub(
+        r"</p\s*>",
+        "\n",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+    value = re.sub(
+        r"<[^>]+>",
+        " ",
+        value,
+    )
+
+    value = re.sub(
+        r"\s+",
+        " ",
+        value,
+    )
+
+    return value.strip()
 
 
 def normalize_title(title):
@@ -131,11 +172,11 @@ def normalize_title(title):
 
 
 def title_words(title):
-    return set(
+    return {
         word
         for word in normalize_title(title).split()
         if len(word) >= 3
-    )
+    }
 
 
 def title_similarity(title1, title2):
@@ -181,7 +222,7 @@ def make_content_key(title):
 
 
 # =========================================================
-# URL NORMALIZATION
+# URL
 # =========================================================
 
 def canonicalize_url(url):
@@ -239,16 +280,6 @@ def canonicalize_url(url):
 # STATE
 # =========================================================
 
-def default_state():
-    return {
-        "sent_links": [],
-        "sent_title_keys": [],
-        "sent_content_keys": [],
-        "users": {},
-        "last_digest_date": "",
-    }
-
-
 def load_state():
     global sent_links
     global sent_title_keys
@@ -299,11 +330,11 @@ def load_state():
         )
 
         print(
-            "STATE: loaded",
+            "STATE LOADED:",
             len(sent_links),
             "links,",
             len(sent_title_keys),
-            "titles."
+            "titles",
         )
 
     except Exception as e:
@@ -359,7 +390,9 @@ def is_duplicate_article(
     source=None,
     existing_articles=None,
 ):
-    canonical_link = canonicalize_url(link)
+    canonical_link = canonicalize_url(
+        link
+    )
 
     title_key = normalize_title(
         title
@@ -369,8 +402,7 @@ def is_duplicate_article(
         title
     )
 
-    # فقط چیزهایی که واقعاً قبلاً ارسال شده‌اند
-    # اینجا duplicate محسوب می‌شوند.
+    # فقط خبرهایی که واقعاً قبلاً ارسال شده‌اند
     if (
         canonical_link
         and canonical_link in sent_links
@@ -389,7 +421,7 @@ def is_duplicate_article(
     ):
         return True
 
-    # بررسی duplicate داخل همین batch
+    # duplicate داخل همین batch
     if existing_articles is not None:
 
         for article in existing_articles:
@@ -420,13 +452,10 @@ def is_duplicate_article(
                 )
             )
 
-            if (
-                title_similarity(
-                    title,
-                    old_title,
-                )
-                >= 0.90
-            ):
+            if title_similarity(
+                title,
+                old_title,
+            ) >= 0.90:
                 return True
 
     return False
@@ -477,14 +506,200 @@ def mark_article_sent(article):
 
 
 # =========================================================
+# IMAGE EXTRACTION FROM RSS
+# =========================================================
+
+def extract_image_from_entry(entry):
+    """
+    تلاش می‌کند عکس خبر را از چند فرمت مختلف RSS پیدا کند.
+    """
+
+    try:
+        # -------------------------------------------------
+        # 1. media_content
+        # -------------------------------------------------
+
+        media_content = entry.get(
+            "media_content",
+            [],
+        )
+
+        for media in media_content:
+
+            url = safe_text(
+                media.get(
+                    "url",
+                    "",
+                )
+            )
+
+            if url:
+                return url
+
+        # -------------------------------------------------
+        # 2. media_thumbnail
+        # -------------------------------------------------
+
+        media_thumbnail = entry.get(
+            "media_thumbnail",
+            [],
+        )
+
+        for media in media_thumbnail:
+
+            url = safe_text(
+                media.get(
+                    "url",
+                    "",
+                )
+            )
+
+            if url:
+                return url
+
+        # -------------------------------------------------
+        # 3. enclosures
+        # -------------------------------------------------
+
+        enclosures = entry.get(
+            "enclosures",
+            [],
+        )
+
+        for enclosure in enclosures:
+
+            url = safe_text(
+                enclosure.get(
+                    "href",
+                    "",
+                )
+            )
+
+            if not url:
+                url = safe_text(
+                    enclosure.get(
+                        "url",
+                        "",
+                    )
+                )
+
+            media_type = safe_text(
+                enclosure.get(
+                    "type",
+                    "",
+                )
+            )
+
+            if (
+                url
+                and (
+                    media_type.startswith(
+                        "image/"
+                    )
+                    or not media_type
+                )
+            ):
+                return url
+
+        # -------------------------------------------------
+        # 4. links with image type
+        # -------------------------------------------------
+
+        links = entry.get(
+            "links",
+            [],
+        )
+
+        for item in links:
+
+            url = safe_text(
+                item.get(
+                    "href",
+                    "",
+                )
+            )
+
+            media_type = safe_text(
+                item.get(
+                    "type",
+                    "",
+                )
+            )
+
+            rel = safe_text(
+                item.get(
+                    "rel",
+                    "",
+                )
+            )
+
+            if (
+                url
+                and (
+                    media_type.startswith(
+                        "image/"
+                    )
+                    or rel == "enclosure"
+                )
+            ):
+                return url
+
+        # -------------------------------------------------
+        # 5. direct image fields
+        # -------------------------------------------------
+
+        for key in [
+            "image",
+            "image_url",
+            "thumbnail",
+            "thumb",
+        ]:
+
+            value = entry.get(
+                key,
+                "",
+            )
+
+            if isinstance(
+                value,
+                dict,
+            ):
+                value = (
+                    value.get("href")
+                    or
+                    value.get("url")
+                    or
+                    value.get("src")
+                )
+
+            value = safe_text(
+                value
+            )
+
+            if value:
+                return value
+
+    except Exception as e:
+
+        print(
+            "IMAGE EXTRACTION ERROR:",
+            type(e).__name__,
+            e,
+        )
+
+    return None
+
+
+# =========================================================
 # RSS
 # =========================================================
 
 def parse_feed(feed_info):
     try:
+
         print(
             "RSS: checking",
-            feed_info["name"]
+            feed_info["name"],
         )
 
         feed = feedparser.parse(
@@ -493,7 +708,7 @@ def parse_feed(feed_info):
 
         articles = []
 
-        for entry in feed.entries[:20]:
+        for entry in feed.entries[:25]:
 
             title = safe_text(
                 entry.get(
@@ -509,7 +724,7 @@ def parse_feed(feed_info):
                 )
             )
 
-            summary = safe_text(
+            summary = clean_html_text(
                 entry.get(
                     "summary",
                     "",
@@ -523,6 +738,10 @@ def parse_feed(feed_info):
                 )
             )
 
+            image_url = extract_image_from_entry(
+                entry
+            )
+
             if not title or not link:
                 continue
 
@@ -533,6 +752,7 @@ def parse_feed(feed_info):
                     "link": link,
                     "summary_original": summary,
                     "published": published,
+                    "image_url": image_url,
                 }
             )
 
@@ -547,6 +767,7 @@ def parse_feed(feed_info):
         return articles
 
     except Exception as e:
+
         print(
             "RSS ERROR:",
             feed_info["name"],
@@ -585,7 +806,6 @@ async def collect_raw_articles():
                 article
             )
 
-    # حذف duplicate داخل batch
     unique = []
 
     for article in all_articles:
@@ -603,13 +823,15 @@ async def collect_raw_articles():
         ):
             continue
 
-        unique.append(article)
+        unique.append(
+            article
+        )
 
         if len(unique) >= MAX_ARTICLES:
             break
 
     print(
-        "RSS: total new articles:",
+        "RSS: TOTAL NEW:",
         len(unique),
     )
 
@@ -627,9 +849,11 @@ def get_openai_client():
     if openai_client is None:
 
         if not OPENAI_API_KEY:
+
             print(
-                "OPENAI: API key is missing."
+                "OPENAI ERROR: API key missing."
             )
+
             return None
 
         openai_client = AsyncOpenAI(
@@ -651,31 +875,32 @@ async def translate_and_classify(
 
     for article in articles:
 
-        title = article.get(
+        original_title = article.get(
             "title_original",
             "",
         )
 
-        summary = article.get(
+        original_summary = article.get(
             "summary_original",
             "",
         )
 
         prompt = f"""
-You are a football news editor for a Persian Telegram channel.
+You are the editor of a Persian football news Telegram channel.
 
-Translate and rewrite this football news into natural Persian.
+Rewrite the following football news in natural Persian.
 
 Rules:
-- Do not invent facts.
-- Keep the important facts.
+- Do not invent information.
+- Keep important facts accurate.
 - Make the headline short and engaging.
-- The final text must be suitable for Telegram.
+- Make the body suitable for Telegram.
+- Use 2 to 4 short paragraphs.
 - Do not include the source URL.
-- Do not use markdown tables.
-- Do not add unrelated opinions.
+- Do not add your own opinion.
+- Determine whether this is an important/breaking football news item.
 
-Return EXACTLY in this format:
+Return EXACTLY:
 
 TITLE:
 <short Persian title>
@@ -686,14 +911,14 @@ TEXT:
 IMPORTANT:
 <YES or NO>
 
-News source:
+SOURCE:
 {article.get("source", "")}
 
-Original title:
-{title}
+ORIGINAL TITLE:
+{original_title}
 
-Original summary:
-{summary}
+ORIGINAL SUMMARY:
+{original_summary}
 """
 
         try:
@@ -703,7 +928,7 @@ Original summary:
                 input=prompt,
             )
 
-            text = safe_text(
+            output = safe_text(
                 getattr(
                     response,
                     "output_text",
@@ -711,55 +936,55 @@ Original summary:
                 )
             )
 
-            if not text:
+            if not output:
+
                 print(
                     "AI: empty response"
                 )
-                continue
 
-            translated_title = ""
-            translated_text = ""
-            important = False
+                continue
 
             title_match = re.search(
                 r"TITLE:\s*(.*?)(?:\n|$)",
-                text,
-                re.IGNORECASE,
+                output,
+                flags=re.IGNORECASE,
             )
 
             text_match = re.search(
                 r"TEXT:\s*(.*?)(?:\nIMPORTANT:|$)",
-                text,
-                re.IGNORECASE | re.DOTALL,
+                output,
+                flags=re.IGNORECASE | re.DOTALL,
             )
 
             important_match = re.search(
                 r"IMPORTANT:\s*(YES|NO)",
-                text,
-                re.IGNORECASE,
+                output,
+                flags=re.IGNORECASE,
             )
 
-            if title_match:
-                translated_title = safe_text(
+            translated_title = (
+                safe_text(
                     title_match.group(1)
                 )
+                if title_match
+                else original_title
+            )
 
-            if text_match:
-                translated_text = safe_text(
+            translated_text = (
+                safe_text(
                     text_match.group(1)
                 )
+                if text_match
+                else original_summary
+            )
+
+            important = False
 
             if important_match:
                 important = (
                     important_match.group(1).upper()
                     == "YES"
                 )
-
-            if not translated_title:
-                translated_title = title
-
-            if not translated_text:
-                translated_text = summary
 
             article["title"] = (
                 translated_title
@@ -769,7 +994,9 @@ Original summary:
                 translated_text
             )
 
-            article["important"] = important
+            article["important"] = (
+                important
+            )
 
             results.append(
                 article
@@ -777,7 +1004,7 @@ Original summary:
 
             print(
                 "AI:",
-                translated_title
+                translated_title,
             )
 
         except Exception as e:
@@ -788,9 +1015,17 @@ Original summary:
                 e,
             )
 
-            # اگر AI خطا داد، خبر را از دست نده
-            article["title"] = title
-            article["text"] = summary
+            # حتی اگر AI خطا داد، خبر از دست نرود
+            article["title"] = (
+                original_title
+            )
+
+            article["text"] = (
+                original_summary
+                or
+                "برای این خبر توضیحات بیشتری در منبع منتشر شده است."
+            )
+
             article["important"] = False
 
             results.append(
@@ -801,32 +1036,94 @@ Original summary:
 
 
 # =========================================================
-# IMAGE
+# IMAGE DOWNLOAD
 # =========================================================
 
-async def fetch_image(article):
+def download_image_sync(url):
     """
-    فعلاً از تصویر RSS استفاده می‌کنیم.
-    اگر RSS تصویر داشته باشد، آن را برمی‌گرداند.
+    عکس را از اینترنت دانلود می‌کند تا مستقیماً
+    به تلگرام Upload شود.
     """
+
+    if not url:
+        return None
 
     try:
-        image_url = article.get(
-            "image",
-            "",
+
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 "
+                    "(Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 "
+                    "Chrome/120 Safari/537.36"
+                )
+            },
         )
 
-        if image_url:
-            return image_url
+        with urllib.request.urlopen(
+            request,
+            timeout=12,
+        ) as response:
+
+            content_type = safe_text(
+                response.headers.get(
+                    "Content-Type",
+                    "",
+                )
+            ).lower()
+
+            if (
+                content_type
+                and not content_type.startswith(
+                    "image/"
+                )
+            ):
+                print(
+                    "IMAGE SKIPPED: not image:",
+                    content_type,
+                )
+
+                return None
+
+            data = response.read(
+                MAX_IMAGE_BYTES + 1
+            )
+
+            if len(data) > MAX_IMAGE_BYTES:
+
+                print(
+                    "IMAGE SKIPPED: too large"
+                )
+
+                return None
+
+            if not data:
+                return None
+
+            return data
+
+    except Exception as e:
+
+        print(
+            "IMAGE DOWNLOAD ERROR:",
+            type(e).__name__,
+            e,
+        )
 
         return None
 
-    except Exception:
-        return None
+
+async def download_image(url):
+    return await asyncio.to_thread(
+        download_image_sync,
+        url,
+    )
 
 
 # =========================================================
-# FORMAT TELEGRAM POST
+# TELEGRAM POST TEXT
 # =========================================================
 
 def build_post_text(article):
@@ -873,7 +1170,7 @@ def build_post_text(article):
 
 
 # =========================================================
-# TELEGRAM POST
+# POST ARTICLE
 # =========================================================
 
 async def post_article(
@@ -887,34 +1184,88 @@ async def post_article(
             article
         )
 
-        image_url = await fetch_image(
-            article
+        image_url = safe_text(
+            article.get(
+                "image_url",
+                "",
+            )
         )
+
+        # =================================================
+        # اول تلاش برای ارسال عکس
+        # =================================================
 
         if image_url:
 
-            try:
+            print(
+                "IMAGE FOUND:",
+                image_url[:150],
+            )
 
-                await bot.send_photo(
-                    chat_id=target,
-                    photo=image_url,
-                    caption=text[:1024],
-                )
+            image_data = await download_image(
+                image_url
+            )
 
-                return True
+            if image_data:
 
-            except Exception as image_error:
+                try:
+
+                    photo = InputFile(
+                        BytesIO(image_data),
+                        filename="vexa_news.jpg",
+                    )
+
+                    # کپشن تلگرام حداکثر 1024 کاراکتر
+                    caption = text[:1024]
+
+                    await bot.send_photo(
+                        chat_id=target,
+                        photo=photo,
+                        caption=caption,
+                    )
+
+                    print(
+                        "POST: photo sent successfully."
+                    )
+
+                    # اگر متن بیشتر از محدودیت کپشن بود،
+                    # ادامه متن را جداگانه بفرست.
+                    if len(text) > 1024:
+
+                        await bot.send_message(
+                            chat_id=target,
+                            text=text[1024:],
+                            disable_web_page_preview=True,
+                        )
+
+                    return True
+
+                except Exception as e:
+
+                    print(
+                        "PHOTO SEND ERROR:",
+                        type(e).__name__,
+                        e,
+                    )
+
+            else:
 
                 print(
-                    "IMAGE POST FAILED:",
-                    type(image_error).__name__,
-                    image_error,
+                    "IMAGE DOWNLOAD FAILED -> TEXT FALLBACK"
                 )
+
+        # =================================================
+        # اگر عکس نشد، متن ارسال شود
+        # =================================================
 
         await bot.send_message(
             chat_id=target,
             text=text,
             disable_web_page_preview=True,
+        )
+
+        print(
+            "POST: text sent successfully."
         )
 
         return True
@@ -931,7 +1282,64 @@ async def post_article(
 
 
 # =========================================================
-# PUBLISH NEWS
+# NEWS PIPELINE
+# =========================================================
+
+async def get_news_pipeline(
+    max_articles=MAX_ARTICLES,
+):
+    articles = await collect_raw_articles()
+
+    if not articles:
+        return []
+
+    articles = articles[:max_articles]
+
+    translated = await translate_and_classify(
+        articles
+    )
+
+    global recent_articles
+
+    # فقط تاریخچه داخلی است.
+    # نباید جلوی ارسال خبر تازه را بگیرد.
+    recent_articles = (
+        translated
+        + recent_articles
+    )
+
+    unique = {}
+
+    for article in recent_articles:
+
+        key = canonicalize_url(
+            article.get(
+                "link",
+                "",
+            )
+        )
+
+        if not key:
+
+            key = normalize_title(
+                article.get(
+                    "title",
+                    "",
+                )
+            )
+
+        if key:
+            unique[key] = article
+
+    recent_articles = list(
+        unique.values()
+    )[:MAX_RECENT_ARTICLES]
+
+    return translated
+
+
+# =========================================================
+# PUBLISH TO CHANNEL
 # =========================================================
 
 async def publish_news(
@@ -954,15 +1362,21 @@ async def publish_news(
             )
         )
 
-        title = (
+        original_title = safe_text(
             article.get(
                 "title_original",
                 "",
             )
+        )
+
+        title = (
+            original_title
             or
-            article.get(
-                "title",
-                "",
+            safe_text(
+                article.get(
+                    "title",
+                    "",
+                )
             )
         )
 
@@ -977,7 +1391,10 @@ async def publish_news(
         # فقط چیزهایی که قبلاً واقعاً
         # در کانال ارسال شده‌اند.
         if (
-            (link and link in sent_links)
+            (
+                link
+                and link in sent_links
+            )
             or
             (
                 title_key
@@ -1040,99 +1457,11 @@ async def publish_news(
 
 
 # =========================================================
-# NEWS PIPELINE
-# =========================================================
-
-async def collect_articles(
-    max_articles=MAX_ARTICLES,
-    fetch_images=True,
-):
-    articles = await collect_raw_articles()
-
-    if not articles:
-        return []
-
-    articles = articles[:max_articles]
-
-    if fetch_images:
-
-        for article in articles:
-
-            try:
-
-                image = await fetch_image(
-                    article
-                )
-
-                if image:
-                    article["image"] = image
-
-            except Exception:
-                pass
-
-    return articles
-
-
-async def get_news_pipeline(
-    max_articles=MAX_ARTICLES,
-    fetch_images=True,
-):
-    articles = await collect_articles(
-        max_articles=max_articles,
-        fetch_images=fetch_images,
-    )
-
-    if not articles:
-        return []
-
-    translated = await translate_and_classify(
-        articles
-    )
-
-    global recent_articles
-
-    # فقط برای نگهداری تاریخچه محلی
-    # است؛ duplicate ارسال‌شدن محسوب نمی‌شود.
-    recent_articles = (
-        translated
-        + recent_articles
-    )
-
-    unique = {}
-
-    for article in recent_articles:
-
-        key = canonicalize_url(
-            article.get(
-                "link",
-                "",
-            )
-        )
-
-        if not key:
-
-            key = normalize_title(
-                article.get(
-                    "title",
-                    "",
-                )
-            )
-
-        if key:
-            unique[key] = article
-
-    recent_articles = list(
-        unique.values()
-    )[:MAX_RECENT_ARTICLES]
-
-    return translated
-
-
-# =========================================================
 # KEYBOARD
 # =========================================================
 
 def main_keyboard():
+
     keyboard = [
         [
             "📰 اخبار جدید",
@@ -1155,7 +1484,7 @@ def main_keyboard():
 
 
 # =========================================================
-# COMMANDS
+# /START
 # =========================================================
 
 async def start_command(
@@ -1183,25 +1512,29 @@ async def start_command(
     )
 
 
+# =========================================================
+# /HELP
+# =========================================================
+
 async def help_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    text = (
-        "ℹ️ راهنمای Vexa\n\n"
-        "/start - شروع ربات\n"
-        "/news - دریافت اخبار جدید\n"
-        "/important - اخبار مهم\n"
-        "/testpost - تست ارسال به کانال\n"
-        "/help - راهنما"
-    )
-
     await update.message.reply_text(
-        text,
+        "ℹ️ راهنمای Vexa\n\n"
+        "/start — شروع ربات\n"
+        "/news — اخبار جدید\n"
+        "/important — اخبار مهم\n"
+        "/testpost — تست ارسال به کانال\n"
+        "/help — راهنما",
         reply_markup=main_keyboard(),
     )
 
+
+# =========================================================
+# CLOSE MENU
+# =========================================================
 
 async def close_menu(
     update: Update,
@@ -1215,7 +1548,7 @@ async def close_menu(
 
 
 # =========================================================
-# PRIVATE NEWS
+# /NEWS
 # =========================================================
 
 async def news_command(
@@ -1230,8 +1563,7 @@ async def news_command(
     try:
 
         articles = await get_news_pipeline(
-            max_articles=5,
-            fetch_images=False,
+            max_articles=5
         )
 
         if not articles:
@@ -1269,6 +1601,10 @@ async def news_command(
         )
 
 
+# =========================================================
+# /IMPORTANT
+# =========================================================
+
 async def important_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -1281,8 +1617,7 @@ async def important_command(
     try:
 
         articles = await get_news_pipeline(
-            max_articles=8,
-            fetch_images=False,
+            max_articles=MAX_ARTICLES
         )
 
         important_articles = [
@@ -1330,7 +1665,7 @@ async def important_command(
 
 
 # =========================================================
-# TEST POST
+# /TESTPOST
 # =========================================================
 
 async def testpost_command(
@@ -1346,6 +1681,7 @@ async def testpost_command(
         ),
         "source": "Vexa",
         "important": False,
+        "image_url": "",
     }
 
     try:
@@ -1471,8 +1807,7 @@ async def automatic_news_job(
     try:
 
         articles = await get_news_pipeline(
-            max_articles=MAX_ARTICLES,
-            fetch_images=True,
+            max_articles=MAX_ARTICLES
         )
 
         if not articles:
@@ -1489,7 +1824,8 @@ async def automatic_news_job(
 
         print(
             "AUTO NEWS:",
-            f"{len(articles)} new articles",
+            len(articles),
+            "new articles",
         )
 
         posted = await publish_news(
@@ -1544,8 +1880,7 @@ async def daily_digest_job(
     try:
 
         articles = await get_news_pipeline(
-            max_articles=MAX_ARTICLES,
-            fetch_images=False,
+            max_articles=MAX_ARTICLES
         )
 
         if not articles:
@@ -1599,6 +1934,7 @@ async def daily_digest_job(
         await context.bot.send_message(
             chat_id=CHANNEL_USERNAME,
             text=digest_text,
+            disable_web_page_preview=True,
         )
 
         last_digest_date = today
@@ -1702,15 +2038,14 @@ def main():
     )
 
     print(
+        "IMAGE SYSTEM: ENABLED"
+    )
+
+    print(
         "===================================="
     )
 
     load_state()
-
-    IMAGE_CACHE_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
 
     application = (
         Application.builder()
@@ -1719,7 +2054,10 @@ def main():
         .build()
     )
 
+    # -----------------------------------------------------
     # Commands
+    # -----------------------------------------------------
+
     application.add_handler(
         CommandHandler(
             "start",
@@ -1755,7 +2093,10 @@ def main():
         )
     )
 
+    # -----------------------------------------------------
     # Keyboard
+    # -----------------------------------------------------
+
     application.add_handler(
         MessageHandler(
             filters.TEXT
@@ -1764,7 +2105,10 @@ def main():
         )
     )
 
+    # -----------------------------------------------------
     # Job Queue
+    # -----------------------------------------------------
+
     if application.job_queue:
 
         application.job_queue.run_repeating(
@@ -1795,7 +2139,7 @@ def main():
     else:
 
         print(
-            "WARNING: JobQueue is not available!"
+            "WARNING: JobQueue unavailable!"
         )
 
     print(
