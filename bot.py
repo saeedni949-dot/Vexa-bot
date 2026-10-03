@@ -7,8 +7,9 @@ import hashlib
 import urllib.request
 import urllib.parse
 import difflib
+
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 import feedparser
@@ -18,7 +19,9 @@ from telegram import (
     Update,
     BotCommand,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
 )
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -213,14 +216,6 @@ def escape_html(text):
 def normalize_title(title):
     title = clean_text(title).lower()
 
-    # حذف لینک و URL
-    title = re.sub(
-        r"https?://\S+",
-        " ",
-        title,
-    )
-
-    # یکسان‌سازی حروف فارسی
     replacements = {
         "ي": "ی",
         "ى": "ی",
@@ -234,9 +229,17 @@ def normalize_title(title):
     }
 
     for old, new in replacements.items():
-        title = title.replace(old, new)
+        title = title.replace(
+            old,
+            new,
+        )
 
-    # حذف اعداد و نشانه‌های اضافی
+    title = re.sub(
+        r"https?://\S+",
+        " ",
+        title,
+    )
+
     title = re.sub(
         r"[^\wآ-ی]+",
         " ",
@@ -244,7 +247,6 @@ def normalize_title(title):
         flags=re.UNICODE,
     )
 
-    # حذف فاصله اضافی
     title = re.sub(
         r"\s+",
         " ",
@@ -281,12 +283,17 @@ def title_similarity(title1, title2):
     words_b = title_words(b)
 
     if words_a and words_b:
+
         intersection = len(
-            words_a.intersection(words_b)
+            words_a.intersection(
+                words_b
+            )
         )
 
         union = len(
-            words_a.union(words_b)
+            words_a.union(
+                words_b
+            )
         )
 
         word_score = (
@@ -294,6 +301,7 @@ def title_similarity(title1, title2):
             if union
             else 0
         )
+
     else:
         word_score = 0
 
@@ -308,6 +316,7 @@ def canonicalize_url(url):
         return ""
 
     try:
+
         parsed = urllib.parse.urlsplit(
             url.strip()
         )
@@ -340,7 +349,7 @@ def canonicalize_url(url):
             filtered
         )
 
-        clean = urllib.parse.urlunsplit(
+        return urllib.parse.urlunsplit(
             (
                 parsed.scheme.lower(),
                 parsed.netloc.lower(),
@@ -349,8 +358,6 @@ def canonicalize_url(url):
                 "",
             )
         )
-
-        return clean
 
     except Exception:
         return url.strip()
@@ -389,7 +396,7 @@ def now_local():
 
 
 # ============================================================
-# ADVANCED DUPLICATE DETECTION
+# DUPLICATE DETECTION
 # ============================================================
 
 def is_duplicate_article(
@@ -410,19 +417,15 @@ def is_duplicate_article(
         title
     )
 
-    # 1. Exact URL
-    if canonical_link in sent_links:
+    if canonical_link and canonical_link in sent_links:
         return True
 
-    # 2. Exact normalized title
-    if title_key in sent_title_keys:
+    if title_key and title_key in sent_title_keys:
         return True
 
-    # 3. Exact content hash
     if content_key in sent_content_keys:
         return True
 
-    # 4. Compare against recent in-memory news
     pool = (
         existing_articles
         if existing_articles is not None
@@ -432,7 +435,10 @@ def is_duplicate_article(
     for article in pool:
 
         old_link = canonicalize_url(
-            article.get("link", "")
+            article.get(
+                "link",
+                "",
+            )
         )
 
         if (
@@ -443,9 +449,14 @@ def is_duplicate_article(
             return True
 
         old_title = (
-            article.get("title_original")
-            or article.get("title")
-            or ""
+            article.get(
+                "title_original",
+                "",
+            )
+            or article.get(
+                "title",
+                "",
+            )
         )
 
         similarity = title_similarity(
@@ -453,18 +464,7 @@ def is_duplicate_article(
             old_title,
         )
 
-        # Very similar titles are considered duplicates.
-        if similarity >= 0.88:
-            return True
-
-        # For different sources, a slightly lower
-        # similarity is enough if most words match.
-        if (
-            source
-            and article.get("source")
-            and source != article.get("source")
-            and similarity >= 0.93
-        ):
+        if similarity >= 0.90:
             return True
 
     return False
@@ -472,13 +472,21 @@ def is_duplicate_article(
 
 def mark_article_sent(article):
     link = canonicalize_url(
-        article.get("link", "")
+        article.get(
+            "link",
+            "",
+        )
     )
 
     title = (
-        article.get("title_original")
-        or article.get("title")
-        or ""
+        article.get(
+            "title_original",
+            "",
+        )
+        or article.get(
+            "title",
+            "",
+        )
     )
 
     title_key = normalize_title(
@@ -549,7 +557,9 @@ def get_rss_image_candidates(entry):
     candidates = []
 
     media_content = (
-        entry.get("media_content")
+        entry.get(
+            "media_content"
+        )
         or []
     )
 
@@ -563,11 +573,15 @@ def get_rss_image_candidates(entry):
 
     for media in media_content:
 
-        url = media.get("url")
+        url = media.get(
+            "url"
+        )
 
         try:
             width = int(
-                media.get("width")
+                media.get(
+                    "width"
+                )
                 or 0
             )
         except Exception:
@@ -591,7 +605,9 @@ def get_rss_image_candidates(entry):
         )
 
     thumbnails = (
-        entry.get("media_thumbnail")
+        entry.get(
+            "media_thumbnail"
+        )
         or []
     )
 
@@ -612,13 +628,21 @@ def get_rss_image_candidates(entry):
         )
 
     for link in (
-        entry.get("links")
+        entry.get(
+            "links"
+        )
         or []
     ):
 
-        href = link.get("href")
+        href = link.get(
+            "href"
+        )
+
         mime = str(
-            link.get("type", "")
+            link.get(
+                "type",
+                "",
+            )
         ).lower()
 
         if "image" in mime:
@@ -633,18 +657,14 @@ def get_rss_image_candidates(entry):
 
 
 def download_article_page(url):
+
     request = urllib.request.Request(
         url,
         headers={
-            "User-Agent": (
+            "User-Agent":
                 "Mozilla/5.0 "
                 "(compatible; "
-                "VexaFootballBot/1.0)"
-            ),
-            "Accept": (
-                "text/html,"
-                "application/xhtml+xml"
-            ),
+                "VexaFootballBot/1.0)",
         },
     )
 
@@ -669,15 +689,12 @@ def extract_meta_images(
 
     patterns = [
 
-        # OpenGraph
         r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
 
-        # Twitter
         r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)',
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
 
-        # Secure OG
         r'<meta[^>]+property=["\']og:image:secure_url["\'][^>]+content=["\']([^"\']+)',
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image:secure_url["\']',
     ]
@@ -687,12 +704,15 @@ def extract_meta_images(
     ):
 
         try:
+
             matches = re.findall(
                 pattern,
                 page_html,
                 flags=re.I,
             )
+
         except Exception:
+
             matches = []
 
         for match in matches:
@@ -705,94 +725,6 @@ def extract_meta_images(
                 ),
                 125 - index * 3,
             )
-
-    # JSON-LD
-    blocks = re.findall(
-        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
-        page_html,
-        flags=re.I | re.S,
-    )
-
-    for block in blocks:
-
-        try:
-            data = json.loads(
-                html.unescape(
-                    block.strip()
-                )
-            )
-
-        except Exception:
-            continue
-
-        objects = (
-            data
-            if isinstance(data, list)
-            else [data]
-        )
-
-        for obj in objects:
-
-            if not isinstance(
-                obj,
-                dict,
-            ):
-                continue
-
-            image = obj.get(
-                "image"
-            )
-
-            if isinstance(
-                image,
-                str,
-            ):
-
-                add_image_candidate(
-                    candidates,
-                    make_absolute_url(
-                        article_url,
-                        image,
-                    ),
-                    110,
-                )
-
-            elif isinstance(
-                image,
-                list,
-            ):
-
-                for item in image:
-
-                    if isinstance(
-                        item,
-                        str,
-                    ):
-
-                        add_image_candidate(
-                            candidates,
-                            make_absolute_url(
-                                article_url,
-                                item,
-                            ),
-                            105,
-                        )
-
-            elif isinstance(
-                image,
-                dict,
-            ):
-
-                add_image_candidate(
-                    candidates,
-                    make_absolute_url(
-                        article_url,
-                        image.get(
-                            "url"
-                        ),
-                    ),
-                    110,
-                )
 
     return candidates
 
@@ -827,9 +759,8 @@ def choose_best_image(
 
         seen.add(url)
 
-        lowered = url.lower()
-
         penalty = 0
+        lowered = url.lower()
 
         for word in bad_words:
 
@@ -847,10 +778,11 @@ def choose_best_image(
         reverse=True
     )
 
-    if not cleaned:
-        return None
-
-    return cleaned[0][1]
+    return (
+        cleaned[0][1]
+        if cleaned
+        else None
+    )
 
 
 def get_article_image(entry):
@@ -859,7 +791,6 @@ def get_article_image(entry):
         "link"
     )
 
-    # First: article page
     if article_url:
 
         try:
@@ -888,10 +819,9 @@ def get_article_image(entry):
 
             print(
                 "ARTICLE IMAGE ERROR:",
-                str(e)[:180],
+                str(e)[:150],
             )
 
-    # Second: RSS
     candidates = (
         get_rss_image_candidates(
             entry
@@ -916,7 +846,7 @@ def download_image_file(url):
     if (
         cache_path.exists()
         and cache_path.stat().st_size
-        > 10_000
+        > 10000
     ):
         return cache_path
 
@@ -924,15 +854,7 @@ def download_image_file(url):
         url,
         headers={
             "User-Agent":
-                "Mozilla/5.0 "
-                "(compatible; "
-                "VexaFootballBot/1.0)",
-            "Accept":
-                "image/avif,"
-                "image/webp,"
-                "image/jpeg,"
-                "image/png,"
-                "image/*;q=0.8",
+                "Mozilla/5.0",
         },
     )
 
@@ -942,13 +864,6 @@ def download_image_file(url):
             request,
             timeout=IMAGE_TIMEOUT,
         ) as response:
-
-            content_type = (
-                response.headers.get(
-                    "Content-Type"
-                )
-                or ""
-            ).lower()
 
             data = response.read(
                 MAX_IMAGE_SIZE + 1
@@ -972,12 +887,6 @@ def download_image_file(url):
             )
         )
 
-        if (
-            "image/" not in content_type
-            and not valid
-        ):
-            return None
-
         if not valid:
             return None
 
@@ -991,21 +900,26 @@ def download_image_file(url):
 
         print(
             "IMAGE DOWNLOAD ERROR:",
-            str(e)[:180],
+            str(e)[:150],
         )
 
         return None
 
 
 # ============================================================
-# RSS COLLECTION
+# RSS
 # ============================================================
 
 def collect_raw_articles():
 
     found = []
+
     seen_links = set()
     seen_titles = []
+
+    print(
+        "RSS: checking sources..."
+    )
 
     for source in RSS_FEEDS:
 
@@ -1013,6 +927,11 @@ def collect_raw_articles():
 
             feed = feedparser.parse(
                 source["url"]
+            )
+
+            print(
+                f"RSS: {source['name']} "
+                f"-> {len(feed.entries)} items"
             )
 
             for entry in feed.entries[
@@ -1038,14 +957,12 @@ def collect_raw_articles():
                     )
                 )
 
-                # Same URL inside this RSS cycle
                 if (
                     canonical_link
                     in seen_links
                 ):
                     continue
 
-                # Similar title inside this RSS cycle
                 duplicate = False
 
                 for old_title in seen_titles:
@@ -1061,7 +978,6 @@ def collect_raw_articles():
                 if duplicate:
                     continue
 
-                # Already sent previously
                 if is_duplicate_article(
                     canonical_link,
                     title,
@@ -1130,6 +1046,11 @@ def collect_raw_articles():
                 e,
             )
 
+    print(
+        f"RSS: {len(found)} new "
+        "candidate articles"
+    )
+
     return found
 
 
@@ -1150,9 +1071,7 @@ async def collect_articles(
             entry["link"],
             entry["title_original"],
             entry["source"],
-            existing_articles=(
-                articles
-            ),
+            existing_articles=articles,
         ):
             continue
 
@@ -1176,7 +1095,7 @@ async def collect_articles(
 
 
 # ============================================================
-# AI EDITOR
+# AI
 # ============================================================
 
 def ai_prompt(articles):
@@ -1211,18 +1130,15 @@ def ai_prompt(articles):
 تو سردبیر حرفه‌ای یک کانال خبری فوتبال فارسی هستی.
 
 برای هر خبر:
+- عنوان کوتاه و طبیعی فارسی بنویس.
+- خلاصه 2 تا 3 جمله‌ای بنویس.
+- اطلاعات جدید اختراع نکن.
+- نام بازیکنان، مربیان و باشگاه‌ها را تغییر نده.
+- اگر اطلاعات ناقص است حدس نزن.
+- لحن خبری و جذاب باشد.
+- کلیک‌بیتی نباشد.
 
-1. عنوان را طبیعی، کوتاه و خبری بازنویسی کن.
-2. خلاصه را در 2 تا 3 جمله فارسی بنویس.
-3. هیچ واقعیت جدیدی اختراع نکن.
-4. نام بازیکنان، مربیان، باشگاه‌ها و مسابقات را تغییر نده.
-5. اگر اطلاعات ناقص است، حدس نزن.
-6. لحن حرفه‌ای ولی زنده و خواندنی باشد.
-7. از تیتر کلیک‌بیتی استفاده نکن.
-8. نوع خبر را تشخیص بده.
-
-category فقط یکی از:
-
+category:
 breaking
 transfer
 match
@@ -1233,14 +1149,12 @@ record
 tournament
 other
 
-importance فقط:
-
+importance:
 high
 medium
 low
 
-style فقط:
-
+style:
 classic
 breaking
 transfer
@@ -1248,19 +1162,13 @@ match
 player
 stats
 
-transfer_status فقط:
-
+transfer_status:
 official
 rumor
 denied
 none
 
-emoji مناسب فوتبال انتخاب کن.
-
-اگر خبر انتقال است، رسمی بودن یا شایعه بودن را فقط
-بر اساس اطلاعات خود خبر مشخص کن.
-
-خروجی فقط JSON معتبر باشد.
+فقط JSON معتبر بده.
 
 ساختار:
 
@@ -1283,7 +1191,7 @@ emoji مناسب فوتبال انتخاب کن.
 
 {json.dumps(
     payload,
-    ensure_ascii=False
+    ensure_ascii=False,
 )}
 """
 
@@ -1295,16 +1203,25 @@ async def translate_and_classify(
     if not articles:
         return []
 
+    # اگر AI در دسترس نباشد،
+    # خبرها را متوقف نمی‌کنیم.
     if client is None:
 
         print(
-            "OPENAI ERROR: "
-            "OPENAI_API_KEY is missing."
+            "AI: API key missing. "
+            "Using fallback."
         )
 
-        return []
+        return fallback_articles(
+            articles
+        )
 
     try:
+
+        print(
+            "AI: sending "
+            f"{len(articles)} articles..."
+        )
 
         response = (
             await client.responses.create(
@@ -1383,21 +1300,21 @@ async def translate_and_classify(
         for item in items:
 
             try:
+
                 idx = int(
                     item.get(
                         "id"
                     )
                 )
+
             except Exception:
                 continue
 
             if (
                 idx < 0
                 or idx >= len(articles)
+                or idx in used_indexes
             ):
-                continue
-
-            if idx in used_indexes:
                 continue
 
             used_indexes.add(idx)
@@ -1479,7 +1396,9 @@ async def translate_and_classify(
                 else "classic"
             )
 
-            article["transfer_status"] = (
+            article[
+                "transfer_status"
+            ] = (
                 transfer_status
                 if transfer_status
                 in valid_transfer
@@ -1502,7 +1421,7 @@ async def translate_and_classify(
                 article
             )
 
-        # Fallback for missing AI results
+        # اگر AI بعضی خبرها را جا انداخت
         for index, article in enumerate(
             articles
         ):
@@ -1510,71 +1429,77 @@ async def translate_and_classify(
             if index in used_indexes:
                 continue
 
-            fallback = dict(
-                article
-            )
-
-            fallback["title"] = (
-                article[
-                    "title_original"
-                ]
-            )
-
-            fallback["summary"] = (
-                article[
-                    "summary_original"
-                ]
-            )
-
-            fallback["category"] = (
-                "other"
-            )
-
-            fallback["importance"] = (
-                "medium"
-            )
-
-            fallback["style"] = (
-                "classic"
-            )
-
-            fallback[
-                "transfer_status"
-            ] = "none"
-
-            fallback["emoji"] = "⚽️"
-
             result.append(
-                fallback
+                make_fallback_article(
+                    article
+                )
             )
+
+        print(
+            f"AI: returned "
+            f"{len(result)} articles"
+        )
 
         return result
 
     except Exception as e:
 
         print(
-            "===================================="
-        )
-
-        print(
-            "OPENAI ERROR"
-        )
-
-        print(
-            "ERROR TYPE:",
+            "AI ERROR:",
             type(e).__name__,
-        )
-
-        print(
-            "ERROR:",
             e,
         )
 
         print(
-            "===================================="
+            "AI: using fallback "
+            "articles."
         )
 
-        return []
+        return fallback_articles(
+            articles
+        )
+
+
+def make_fallback_article(
+    article
+):
+
+    result = dict(
+        article
+    )
+
+    result["title"] = (
+        article[
+            "title_original"
+        ]
+    )
+
+    result["summary"] = (
+        article[
+            "summary_original"
+        ]
+        or "خبر جدید فوتبال."
+    )
+
+    result["category"] = "other"
+    result["importance"] = "medium"
+    result["style"] = "classic"
+    result["transfer_status"] = "none"
+    result["emoji"] = "⚽️"
+
+    return result
+
+
+def fallback_articles(
+    articles
+):
+
+    return [
+        make_fallback_article(
+            article
+        )
+        for article in articles
+    ]
 
 
 # ============================================================
@@ -1584,15 +1509,24 @@ async def translate_and_classify(
 def build_news_text(article):
 
     title = escape_html(
-        article.get("title")
+        article.get(
+            "title",
+            "",
+        )
     )
 
     summary = escape_html(
-        article.get("summary")
+        article.get(
+            "summary",
+            "",
+        )
     )
 
     source = escape_html(
-        article.get("source")
+        article.get(
+            "source",
+            "",
+        )
     )
 
     emoji = escape_html(
@@ -1666,10 +1600,7 @@ def build_news_text(article):
                 "</b>"
             )
 
-    elif (
-        category == "match"
-        or style == "match"
-    ):
+    elif category == "match":
 
         header = (
             "🏟️ <b>گزارش مسابقه</b>"
@@ -1711,7 +1642,7 @@ def build_news_text(article):
 
 
 # ============================================================
-# POST
+# POSTING
 # ============================================================
 
 async def post_article(
@@ -1757,12 +1688,19 @@ async def post_article(
                             write_timeout=30,
                         )
 
+                    print(
+                        "POST OK (photo):",
+                        article.get(
+                            "title"
+                        ),
+                    )
+
                     return True
 
                 except Exception as e:
 
                     print(
-                        "SEND PHOTO ERROR:",
+                        "PHOTO POST FAILED:",
                         e,
                     )
 
@@ -1771,6 +1709,15 @@ async def post_article(
             text=text,
             parse_mode="HTML",
             disable_web_page_preview=True,
+            read_timeout=30,
+            write_timeout=30,
+        )
+
+        print(
+            "POST OK (text):",
+            article.get(
+                "title"
+            ),
         )
 
         return True
@@ -1778,7 +1725,8 @@ async def post_article(
     except Exception as e:
 
         print(
-            "POST ARTICLE ERROR:",
+            "TELEGRAM POST ERROR:",
+            type(e).__name__,
             e,
         )
 
@@ -1810,7 +1758,6 @@ async def get_news_pipeline(
 
     global recent_articles
 
-    # ذخیره در کش جستجو
     recent_articles = (
         translated
         + recent_articles
@@ -1836,7 +1783,8 @@ async def get_news_pipeline(
                 )
             )
 
-        unique[key] = article
+        if key:
+            unique[key] = article
 
     recent_articles = list(
         unique.values()
@@ -1853,28 +1801,36 @@ async def publish_news(
 
     posted = 0
 
+    print(
+        f"PUBLISH: "
+        f"{len(articles)} articles "
+        f"ready."
+    )
+
     for article in articles:
 
-        # یک بررسی نهایی درست قبل از ارسال
+        original_title = (
+            article.get(
+                "title_original",
+                "",
+            )
+        )
+
         if is_duplicate_article(
             article.get(
                 "link",
                 "",
             ),
-            article.get(
-                "title_original",
-                article.get(
-                    "title",
-                    "",
-                ),
+            original_title
+            or article.get(
+                "title",
+                "",
             ),
         ):
+
             print(
                 "DUPLICATE BLOCKED:",
-                article.get(
-                    "title",
-                    "",
-                ),
+                original_title,
             )
 
             continue
@@ -1897,22 +1853,44 @@ async def publish_news(
             1.2
         )
 
+    print(
+        f"PUBLISH: "
+        f"{posted} successfully posted."
+    )
+
     return posted
 
 
 # ============================================================
-# AUTOMATIC NEWS
+# AUTOMATIC NEWS JOB
 # ============================================================
 
 async def automatic_news_job(
     context
 ):
 
-    try:
+    print(
+        "\n"
+        "===================================="
+    )
 
-        print(
-            "AUTO NEWS: checking..."
-        )
+    print(
+        "AUTO NEWS JOB STARTED"
+    )
+
+    print(
+        "TIME:",
+        now_local().strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+    )
+
+    print(
+        "CHANNEL:",
+        CHANNEL_USERNAME,
+    )
+
+    try:
 
         articles = (
             await get_news_pipeline(
@@ -1925,27 +1903,43 @@ async def automatic_news_job(
 
             print(
                 "AUTO NEWS: "
-                "no new articles."
+                "NO NEW ARTICLES"
+            )
+
+            print(
+                "===================================="
             )
 
             return
 
+        print(
+            "AUTO NEWS: "
+            f"{len(articles)} new articles"
+        )
+
         posted = await publish_news(
             articles,
             context.bot,
+            CHANNEL_USERNAME,
         )
 
         print(
-            f"AUTO NEWS: "
-            f"posted {posted} articles."
+            "AUTO NEWS FINISHED:",
+            posted,
+            "posted",
         )
 
     except Exception as e:
 
         print(
             "AUTO NEWS ERROR:",
+            type(e).__name__,
             e,
         )
+
+    print(
+        "====================================\n"
+    )
 
 
 # ============================================================
@@ -2061,13 +2055,10 @@ async def send_filtered_news(
 
             await update.message.reply_text(
                 "فعلاً خبر تازه‌ای "
-                "در این بخش پیدا نکردم. "
-                "🔎⚽️"
+                "در این بخش پیدا نکردم. 🔎⚽️"
             )
 
             return
-
-        posted = 0
 
         for article in filtered[:6]:
 
@@ -2079,14 +2070,12 @@ async def send_filtered_news(
                 ),
             )
 
-            posted += 1
-
             await asyncio.sleep(
                 0.8
             )
 
         await update.message.reply_text(
-            f"✅ {posted} خبر آماده شد.",
+            "✅ تموم شد.",
             reply_markup=MAIN_KEYBOARD,
         )
 
@@ -2218,6 +2207,10 @@ async def daily_digest_job(
 
             save_state()
 
+            print(
+                "DAILY DIGEST: sent."
+            )
+
     except Exception as e:
 
         print(
@@ -2263,6 +2256,7 @@ def search_cached_news(
         ).lower()
 
         if query in haystack:
+
             results.append(
                 article
             )
@@ -2282,8 +2276,7 @@ async def search_news(
             "مثلاً:\n\n"
             "/search Real Madrid\n"
             "/search Mbappe\n"
-            "/search نقل و انتقالات",
-            reply_markup=MAIN_KEYBOARD,
+            "/search نقل و انتقالات"
         )
 
         return
@@ -2471,7 +2464,7 @@ def build_trends():
 
 
 # ============================================================
-# USER PREFERENCES
+# USER DATA
 # ============================================================
 
 def user_key(update):
@@ -2505,9 +2498,7 @@ def get_user_data(update):
     return users[key]
 
 
-def user_subscriptions(
-    update
-):
+def user_subscriptions(update):
 
     data = get_user_data(
         update
@@ -2592,7 +2583,7 @@ def remove_subscription(
 
 
 # ============================================================
-# KEYBOARD
+# KEYBOARDS
 # ============================================================
 
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
@@ -2624,9 +2615,12 @@ MAIN_KEYBOARD = ReplyKeyboardMarkup(
         [
             "🆘 راهنما",
         ],
+        [
+            "❌ بستن منو",
+        ],
     ],
     resize_keyboard=True,
-    is_persistent=True,
+    is_persistent=False,
 )
 
 
@@ -2643,10 +2637,8 @@ async def start(
         "🤖⚽️ <b>"
         "به Vexa خوش اومدی!"
         "</b>\n\n"
-        "من یه دستیار خبری فوتبالی‌ام؛ "
-        "اخبار، نقل‌وانتقالات، بازیکنان، "
-        "آمار، جستجو و جمع‌بندی روزانه "
-        "رو برات آماده می‌کنم.",
+        "اخبار فوتبال، نقل‌وانتقالات، "
+        "بازیکنان، آمار و جستجو.",
         parse_mode="HTML",
         reply_markup=MAIN_KEYBOARD,
     )
@@ -2659,7 +2651,6 @@ async def help_command(
 
     await update.message.reply_text(
         "🆘 <b>راهنمای Vexa</b>\n\n"
-
         "📰 /news — آخرین اخبار\n"
         "🔥 /important — اخبار مهم\n"
         "🔄 /transfers — نقل‌وانتقالات\n"
@@ -2673,8 +2664,7 @@ async def help_command(
         "❌ /unsubscribe تیم — حذف\n"
         "❤️ /favorites — علاقه‌مندی‌ها\n"
         "📈 /trends — ترندها\n"
-        "🤖 /about — درباره Vexa\n"
-        "🧪 /testpost — تست ارسال",
+        "🤖 /about — درباره Vexa",
         parse_mode="HTML",
         reply_markup=MAIN_KEYBOARD,
     )
@@ -3024,17 +3014,48 @@ async def testpost_command(
     context,
 ):
 
-    await context.bot.send_message(
-        chat_id=CHANNEL_USERNAME,
-        text=(
-            "🤖⚽️ <b>Vexa Test</b>\n\n"
-            "سیستم ارسال کانال سالم است."
-        ),
-        parse_mode="HTML",
-    )
+    try:
+
+        await context.bot.send_message(
+            chat_id=CHANNEL_USERNAME,
+            text=(
+                "🤖⚽️ <b>Vexa Test</b>\n\n"
+                "سیستم ارسال به کانال سالم است."
+            ),
+            parse_mode="HTML",
+        )
+
+        await update.message.reply_text(
+            "✅ پست تست به کانال ارسال شد."
+        )
+
+    except Exception as e:
+
+        print(
+            "TEST POST ERROR:",
+            e,
+        )
+
+        await update.message.reply_text(
+            "❌ ارسال تست به کانال شکست خورد.\n\n"
+            f"خطا: {e}"
+        )
+
+
+# ============================================================
+# CLOSE MENU
+# ============================================================
+
+async def close_menu(
+    update,
+    context,
+):
 
     await update.message.reply_text(
-        "✅ پست تست ارسال شد."
+        "✅ منو بسته شد.\n\n"
+        "هر وقت خواستی دوباره بازش کنی "
+        "فقط /start رو بزن.",
+        reply_markup=ReplyKeyboardRemove(),
     )
 
 
@@ -3050,6 +3071,15 @@ async def text_router(
     text = clean_text(
         update.message.text
     )
+
+    if text == "❌ بستن منو":
+
+        await close_menu(
+            update,
+            context,
+        )
+
+        return
 
     mapping = {
 
@@ -3110,7 +3140,6 @@ async def text_router(
 
         return
 
-    # جستجوی طبیعی
     if (
         len(text) >= 3
         and not text.startswith("/")
@@ -3124,7 +3153,7 @@ async def text_router(
 
 
 # ============================================================
-# COMMAND MENU
+# BOT MENU
 # ============================================================
 
 async def post_init(
@@ -3209,18 +3238,18 @@ async def post_init(
         ),
 
         BotCommand(
-            "help",
-            "راهنما",
-        ),
-
-        BotCommand(
             "testpost",
             "تست ارسال",
         ),
+
     ]
 
     await application.bot.set_my_commands(
         commands
+    )
+
+    print(
+        "BOT COMMANDS SET"
     )
 
 
@@ -3249,7 +3278,9 @@ def main():
         .build()
     )
 
-    # Commands
+    # --------------------------------------------------------
+    # COMMAND HANDLERS
+    # --------------------------------------------------------
 
     application.add_handler(
         CommandHandler(
@@ -3370,7 +3401,9 @@ def main():
         )
     )
 
-    # Ordinary text
+    # --------------------------------------------------------
+    # TEXT
+    # --------------------------------------------------------
 
     application.add_handler(
         MessageHandler(
@@ -3380,9 +3413,9 @@ def main():
         )
     )
 
-    # ========================================================
-    # JOBS
-    # ========================================================
+    # --------------------------------------------------------
+    # JOB QUEUE
+    # --------------------------------------------------------
 
     if application.job_queue:
 
@@ -3395,22 +3428,47 @@ def main():
 
         application.job_queue.run_daily(
             daily_digest_job,
-            time=datetime(
-                2000,
-                1,
-                1,
+            time=time(
                 DAILY_DIGEST_HOUR,
                 DAILY_DIGEST_MINUTE,
                 tzinfo=LOCAL_TZ,
-            ).time(),
+            ),
             name="vexa_daily_digest",
+        )
+
+        print(
+            "JOB QUEUE: ENABLED"
+        )
+
+        print(
+            "AUTO NEWS: every",
+            NEWS_INTERVAL,
+            "seconds",
+        )
+
+        print(
+            "FIRST AUTO NEWS:",
+            FIRST_NEWS_DELAY,
+            "seconds",
+        )
+
+        print(
+            "DAILY DIGEST:",
+            f"{DAILY_DIGEST_HOUR:02d}:"
+            f"{DAILY_DIGEST_MINUTE:02d}",
+            "Europe/Budapest",
         )
 
     else:
 
         print(
-            "WARNING: JobQueue unavailable."
+            "WARNING: JOB QUEUE "
+            "IS NOT AVAILABLE!"
         )
+
+    # --------------------------------------------------------
+    # START
+    # --------------------------------------------------------
 
     print(
         "===================================="
@@ -3431,19 +3489,24 @@ def main():
     )
 
     print(
-        "NEWS INTERVAL:",
-        NEWS_INTERVAL,
+        "DUPLICATE PROTECTION: ON"
     )
 
     print(
-        "DUPLICATE PROTECTION: ON"
+        "AUTO CHANNEL POSTING: ON"
+    )
+
+    print(
+        "MENU CLOSE BUTTON: ON"
     )
 
     print(
         "===================================="
     )
 
-    application.run_polling()
+    application.run_polling(
+        drop_pending_updates=True
+    )
 
 
 if __name__ == "__main__":
