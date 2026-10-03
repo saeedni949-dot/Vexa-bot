@@ -60,7 +60,7 @@ HTTP_TIMEOUT = 15
 
 
 # =========================================================
-# RSS
+# RSS FEEDS
 # =========================================================
 
 RSS_FEEDS = [
@@ -426,7 +426,7 @@ def save_state():
 
 
 # =========================================================
-# DUPLICATE
+# DUPLICATE SYSTEM
 # =========================================================
 
 def is_duplicate_article(
@@ -586,54 +586,201 @@ def make_request(
     )
 
 
-def fetch_url_bytes_sync(
-    url,
-    max_bytes=MAX_IMAGE_BYTES,
+# =========================================================
+# RSS IMAGE
+# =========================================================
+
+def extract_image_from_entry(
+    entry
 ):
 
     try:
 
-        request = make_request(
-            url
+        # media_content
+        media_content = entry.get(
+            "media_content",
+            [],
         )
 
-        with urllib.request.urlopen(
-            request,
-            timeout=HTTP_TIMEOUT,
-        ) as response:
+        candidates = []
 
-            content_type = safe_text(
-                response.headers.get(
-                    "Content-Type",
+        for media in media_content:
+
+            url = safe_text(
+                media.get(
+                    "url",
+                    "",
+                )
+            )
+
+            width = media.get(
+                "width",
+                0,
+            )
+
+            try:
+                width = int(width)
+            except Exception:
+                width = 0
+
+            if url:
+
+                candidates.append(
+                    (
+                        width,
+                        url,
+                    )
+                )
+
+        if candidates:
+
+            candidates.sort(
+                key=lambda x: x[0],
+                reverse=True,
+            )
+
+            return candidates[0][1]
+
+        # media_thumbnail
+        thumbnails = entry.get(
+            "media_thumbnail",
+            [],
+        )
+
+        candidates = []
+
+        for media in thumbnails:
+
+            url = safe_text(
+                media.get(
+                    "url",
+                    "",
+                )
+            )
+
+            width = media.get(
+                "width",
+                0,
+            )
+
+            try:
+                width = int(width)
+            except Exception:
+                width = 0
+
+            if url:
+
+                candidates.append(
+                    (
+                        width,
+                        url,
+                    )
+                )
+
+        if candidates:
+
+            candidates.sort(
+                key=lambda x: x[0],
+                reverse=True,
+            )
+
+            return candidates[0][1]
+
+        # enclosures
+        for enclosure in entry.get(
+            "enclosures",
+            [],
+        ):
+
+            url = (
+                safe_text(
+                    enclosure.get(
+                        "href",
+                        "",
+                    )
+                )
+                or
+                safe_text(
+                    enclosure.get(
+                        "url",
+                        "",
+                    )
+                )
+            )
+
+            media_type = safe_text(
+                enclosure.get(
+                    "type",
                     "",
                 )
             ).lower()
 
-            data = response.read(
-                max_bytes + 1
+            if (
+                url
+                and (
+                    not media_type
+                    or
+                    media_type.startswith(
+                        "image/"
+                    )
+                )
+            ):
+
+                return url
+
+        # links
+        for item in entry.get(
+            "links",
+            [],
+        ):
+
+            url = safe_text(
+                item.get(
+                    "href",
+                    "",
+                )
+            )
+
+            media_type = safe_text(
+                item.get(
+                    "type",
+                    "",
+                )
+            ).lower()
+
+            rel = safe_text(
+                item.get(
+                    "rel",
+                    "",
+                )
             )
 
             if (
-                len(data)
-                > max_bytes
+                url
+                and (
+                    media_type.startswith(
+                        "image/"
+                    )
+                    or
+                    rel == "enclosure"
+                )
             ):
-                return None, content_type
 
-            return data, content_type
+                return url
 
     except Exception as e:
 
         print(
-            "HTTP ERROR:",
+            "RSS IMAGE ERROR:",
             type(e).__name__,
             e,
         )
 
-        return None, ""
+    return None
 
 
 # =========================================================
-# IMAGE URL EXTRACTION
+# IMAGE URL HELPERS
 # =========================================================
 
 def normalize_image_url(
@@ -691,196 +838,6 @@ def normalize_image_url(
     return image_url
 
 
-def extract_image_from_entry(
-    entry
-):
-
-    try:
-
-        # -------------------------------------------------
-        # media_content
-        # -------------------------------------------------
-
-        media_content = entry.get(
-            "media_content",
-            [],
-        )
-
-        candidates = []
-
-        for media in media_content:
-
-            url = safe_text(
-                media.get(
-                    "url",
-                    "",
-                )
-            )
-
-            width = media.get(
-                "width",
-                0,
-            )
-
-            try:
-                width = int(width)
-            except Exception:
-                width = 0
-
-            if url:
-
-                candidates.append(
-                    (
-                        width,
-                        url,
-                    )
-                )
-
-        if candidates:
-
-            candidates.sort(
-                key=lambda x: x[0],
-                reverse=True,
-            )
-
-            return candidates[0][1]
-
-        # -------------------------------------------------
-        # media_thumbnail
-        # -------------------------------------------------
-
-        thumbnails = entry.get(
-            "media_thumbnail",
-            [],
-        )
-
-        candidates = []
-
-        for media in thumbnails:
-
-            url = safe_text(
-                media.get(
-                    "url",
-                    "",
-                )
-            )
-
-            width = media.get(
-                "width",
-                0,
-            )
-
-            try:
-                width = int(width)
-            except Exception:
-                width = 0
-
-            if url:
-
-                candidates.append(
-                    (
-                        width,
-                        url,
-                    )
-                )
-
-        if candidates:
-
-            candidates.sort(
-                key=lambda x: x[0],
-                reverse=True,
-            )
-
-            return candidates[0][1]
-
-        # -------------------------------------------------
-        # enclosure
-        # -------------------------------------------------
-
-        for enclosure in entry.get(
-            "enclosures",
-            [],
-        ):
-
-            url = (
-                safe_text(
-                    enclosure.get(
-                        "href",
-                        "",
-                    )
-                )
-                or
-                safe_text(
-                    enclosure.get(
-                        "url",
-                        "",
-                    )
-                )
-            )
-
-            content_type = safe_text(
-                enclosure.get(
-                    "type",
-                    "",
-                )
-            ).lower()
-
-            if (
-                url
-                and (
-                    not content_type
-                    or
-                    content_type.startswith(
-                        "image/"
-                    )
-                )
-            ):
-
-                return url
-
-        # -------------------------------------------------
-        # entry links
-        # -------------------------------------------------
-
-        for item in entry.get(
-            "links",
-            [],
-        ):
-
-            url = safe_text(
-                item.get(
-                    "href",
-                    "",
-                )
-            )
-
-            content_type = safe_text(
-                item.get(
-                    "type",
-                    "",
-                )
-            ).lower()
-
-            if (
-                url
-                and content_type.startswith(
-                    "image/"
-                )
-            ):
-
-                return url
-
-    except Exception as e:
-
-        print(
-            "RSS IMAGE ERROR:",
-            type(e).__name__,
-            e,
-        )
-
-    return None
-
-
 # =========================================================
 # HTML IMAGE EXTRACTION
 # =========================================================
@@ -895,21 +852,24 @@ def extract_meta_image(
 
     candidates = []
 
-    # -----------------------------------------------------
-    # og:image
-    # -----------------------------------------------------
-
     patterns = [
+
+        # Open Graph
         r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
 
         r'<meta[^>]+property=["\']og:image:secure_url["\'][^>]+content=["\']([^"\']+)["\']',
+
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image:secure_url["\']',
 
+        # Twitter
         r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
 
         r'<meta[^>]+name=["\']twitter:image:src["\'][^>]+content=["\']([^"\']+)["\']',
+
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image:src["\']',
     ]
 
@@ -929,16 +889,16 @@ def extract_meta_image(
             )
 
             if value:
+
                 candidates.append(
                     value
                 )
 
-    # -----------------------------------------------------
-    # link rel=image_src
-    # -----------------------------------------------------
-
+    # image_src
     link_patterns = [
+
         r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\']([^"\']+)["\']',
+
         r'<link[^>]+href=["\']([^"\']+)["\'][^>]+rel=["\']image_src["\']',
     ]
 
@@ -958,19 +918,22 @@ def extract_meta_image(
             )
 
             if value:
+
                 candidates.append(
                     value
                 )
 
     if candidates:
 
-        # حذف duplicate
         unique = []
 
         for item in candidates:
 
             if item not in unique:
-                unique.append(item)
+
+                unique.append(
+                    item
+                )
 
         return unique[0]
 
@@ -987,7 +950,6 @@ def extract_srcset_images(
 
     results = []
 
-    # srcset
     matches = re.findall(
         r'(?:srcset|data-srcset)=["\']([^"\']+)["\']',
         html_text,
@@ -1019,10 +981,13 @@ def extract_srcset_images(
                 if match:
 
                     try:
+
                         width = int(
                             match.group(1)
                         )
+
                     except Exception:
+
                         width = 0
 
             url = normalize_image_url(
@@ -1061,9 +1026,10 @@ def extract_html_image_urls(
 
     candidates = []
 
-    # عکس‌هایی که معمولاً تصویر اصلی مقاله هستند
     patterns = [
+
         r'<img[^>]+(?:src|data-src)=["\']([^"\']+)["\']',
+
         r'<source[^>]+(?:src|data-src)=["\']([^"\']+)["\']',
     ]
 
@@ -1083,11 +1049,11 @@ def extract_html_image_urls(
             )
 
             if value:
+
                 candidates.append(
                     value
                 )
 
-    # srcsetهای بزرگ
     candidates.extend(
         extract_srcset_images(
             html_text,
@@ -1095,7 +1061,6 @@ def extract_html_image_urls(
         )
     )
 
-    # حذف duplicate
     unique = []
 
     for item in candidates:
@@ -1110,7 +1075,7 @@ def extract_html_image_urls(
 
 
 # =========================================================
-# GET HIGH QUALITY IMAGE FROM ARTICLE PAGE
+# HIGH QUALITY IMAGE
 # =========================================================
 
 def get_article_page_image_sync(
@@ -1119,6 +1084,7 @@ def get_article_page_image_sync(
 ):
 
     if not article_url:
+
         return rss_image
 
     try:
@@ -1176,10 +1142,7 @@ def get_article_page_image_sync(
             errors="ignore",
         )
 
-        # -------------------------------------------------
-        # 1. بهترین گزینه: og:image
-        # -------------------------------------------------
-
+        # 1. og:image
         og_image = extract_meta_image(
             page,
             page_url,
@@ -1194,10 +1157,7 @@ def get_article_page_image_sync(
 
             return og_image
 
-        # -------------------------------------------------
-        # 2. srcset بزرگ
-        # -------------------------------------------------
-
+        # 2. srcset
         srcset_images = (
             extract_srcset_images(
                 page,
@@ -1214,10 +1174,7 @@ def get_article_page_image_sync(
 
             return srcset_images[0]
 
-        # -------------------------------------------------
-        # 3. image tags
-        # -------------------------------------------------
-
+        # 3. normal HTML image
         html_images = (
             extract_html_image_urls(
                 page,
@@ -1258,7 +1215,7 @@ async def get_best_image_url(
 
 
 # =========================================================
-# DOWNLOAD IMAGE
+# IMAGE DOWNLOAD
 # =========================================================
 
 def download_image_sync(
@@ -1312,10 +1269,9 @@ def download_image_sync(
                 return None
 
             if not data:
+
                 return None
 
-            # بعض سایت‌ها Content-Type اشتباه می‌دهند؛
-            # بنابراین فقط با Content-Type رد نمی‌کنیم.
             if (
                 content_type
                 and
@@ -1324,7 +1280,6 @@ def download_image_sync(
                 )
             ):
 
-                # اگر واقعاً HTML بود، عکس نیست.
                 if (
                     b"<html"
                     in data[:5000].lower()
@@ -1369,7 +1324,7 @@ async def download_image(
 
 
 # =========================================================
-# RSS
+# RSS PARSER
 # =========================================================
 
 def parse_feed(
@@ -1430,6 +1385,7 @@ def parse_feed(
                 or
                 not link
             ):
+
                 continue
 
             articles.append(
@@ -1489,6 +1445,7 @@ async def collect_raw_articles():
                     "",
                 ),
             ):
+
                 continue
 
             all_articles.append(
@@ -1510,6 +1467,7 @@ async def collect_raw_articles():
             ),
             existing_articles=unique,
         ):
+
             continue
 
         unique.append(
@@ -1520,6 +1478,7 @@ async def collect_raw_articles():
             len(unique)
             >= MAX_ARTICLES
         ):
+
             break
 
     print(
@@ -1564,6 +1523,7 @@ async def translate_and_classify(
     client = get_openai_client()
 
     if not client:
+
         return articles
 
     results = []
@@ -1597,7 +1557,35 @@ Rules:
 - Use 2 to 4 short paragraphs.
 - Do not include the source URL.
 - Do not add your own opinion.
-- Determine whether this is important football news.
+
+IMPORTANT CLASSIFICATION RULE:
+
+Determine the importance level of this football news.
+
+Use EXACTLY ONE of these levels:
+
+URGENT = only for genuinely breaking or major news, such as:
+- Official signing of a major player
+- Major transfer announcement
+- Major managerial change
+- Major trophy or final result
+- Major injury to a key player
+- Major official club or federation announcement
+- Extremely important breaking football news
+
+IMPORTANT = important football news that deserves extra attention, but is not breaking news.
+
+NORMAL = ordinary football news, interviews, training updates, routine comments, minor rumors, minor squad news, or stories that are interesting but not major.
+
+BE STRICT.
+
+Most ordinary football news should be NORMAL.
+
+Do NOT mark ordinary news as URGENT or IMPORTANT just because it is interesting.
+
+Do NOT use URGENT for normal transfer rumors.
+
+Do NOT use IMPORTANT for ordinary interviews or routine training news.
 
 Return EXACTLY:
 
@@ -1607,8 +1595,8 @@ TITLE:
 TEXT:
 <2 to 4 short Persian paragraphs>
 
-IMPORTANT:
-<YES or NO>
+LEVEL:
+<URGENT or IMPORTANT or NORMAL>
 
 SOURCE:
 {article.get("source", "")}
@@ -1652,7 +1640,7 @@ ORIGINAL SUMMARY:
             )
 
             text_match = re.search(
-                r"TEXT:\s*(.*?)(?:\nIMPORTANT:|$)",
+                r"TEXT:\s*(.*?)(?:\nLEVEL:|$)",
                 output,
                 flags=(
                     re.IGNORECASE
@@ -1661,8 +1649,8 @@ ORIGINAL SUMMARY:
                 ),
             )
 
-            important_match = re.search(
-                r"IMPORTANT:\s*(YES|NO)",
+            level_match = re.search(
+                r"LEVEL:\s*(URGENT|IMPORTANT|NORMAL)",
                 output,
                 flags=re.IGNORECASE,
             )
@@ -1695,15 +1683,24 @@ ORIGINAL SUMMARY:
                     original_summary
                 )
 
-            important = False
+            level = "NORMAL"
 
-            if important_match:
+            if level_match:
 
-                important = (
-                    important_match.group(1)
+                level = (
+                    level_match.group(1)
                     .upper()
-                    == "YES"
                 )
+
+            # امنیت بیشتر:
+            # هر چیزی غیر از سه مقدار مجاز = NORMAL
+            if level not in {
+                "URGENT",
+                "IMPORTANT",
+                "NORMAL",
+            }:
+
+                level = "NORMAL"
 
             article["title"] = (
                 translated_title
@@ -1713,8 +1710,14 @@ ORIGINAL SUMMARY:
                 translated_text
             )
 
+            article["level"] = level
+
             article["important"] = (
-                important
+                level
+                in {
+                    "URGENT",
+                    "IMPORTANT",
+                }
             )
 
             results.append(
@@ -1724,6 +1727,8 @@ ORIGINAL SUMMARY:
             print(
                 "AI:",
                 translated_title,
+                "| LEVEL:",
+                level,
             )
 
         except Exception as e:
@@ -1744,6 +1749,10 @@ ORIGINAL SUMMARY:
                 "برای این خبر اطلاعات بیشتری در منبع اصلی منتشر شده است."
             )
 
+            article["level"] = (
+                "NORMAL"
+            )
+
             article["important"] = False
 
             results.append(
@@ -1754,7 +1763,7 @@ ORIGINAL SUMMARY:
 
 
 # =========================================================
-# PREPARE BEST IMAGES
+# PREPARE IMAGES
 # =========================================================
 
 async def prepare_article_images(
@@ -1781,7 +1790,6 @@ async def prepare_article_images(
             )
         )
 
-        # اول صفحه اصلی خبر را بررسی می‌کنیم
         best_image = (
             await get_best_image_url(
                 article_url,
@@ -1811,7 +1819,7 @@ async def prepare_article_images(
 
 
 # =========================================================
-# PIPELINE
+# NEWS PIPELINE
 # =========================================================
 
 async def get_news_pipeline(
@@ -1821,6 +1829,7 @@ async def get_news_pipeline(
     articles = await collect_raw_articles()
 
     if not articles:
+
         return []
 
     articles = articles[
@@ -1833,7 +1842,6 @@ async def get_news_pipeline(
         )
     )
 
-    # پیدا کردن عکس باکیفیت
     translated = (
         await prepare_article_images(
             translated
@@ -1881,7 +1889,7 @@ async def get_news_pipeline(
 
 
 # =========================================================
-# POST TEXT
+# BUILD POST TEXT
 # =========================================================
 
 def build_post_text(
@@ -1909,14 +1917,18 @@ def build_post_text(
         )
     )
 
-    important = article.get(
-        "important",
-        False,
+    level = article.get(
+        "level",
+        "NORMAL",
     )
 
-    if important:
+    if level == "URGENT":
 
-        prefix = "🚨 خبر مهم"
+        prefix = "🚨 خبر فوری"
+
+    elif level == "IMPORTANT":
+
+        prefix = "🔥 خبر مهم"
 
     else:
 
@@ -1931,7 +1943,7 @@ def build_post_text(
 
 
 # =========================================================
-# TELEGRAM POST
+# POST ARTICLE
 # =========================================================
 
 async def post_article(
@@ -1952,10 +1964,6 @@ async def post_article(
                 "",
             )
         )
-
-        # -------------------------------------------------
-        # PHOTO
-        # -------------------------------------------------
 
         if image_url:
 
@@ -1983,7 +1991,6 @@ async def post_article(
                         ),
                     )
 
-                    # Telegram caption limit
                     caption = text[
                         :1024
                     ]
@@ -1998,7 +2005,6 @@ async def post_article(
                         "PHOTO POST SUCCESS"
                     )
 
-                    # ادامه متن در صورت نیاز
                     if len(text) > 1024:
 
                         await bot.send_message(
@@ -2022,10 +2028,6 @@ async def post_article(
                 print(
                     "IMAGE FAILED -> TEXT FALLBACK"
                 )
-
-        # -------------------------------------------------
-        # TEXT FALLBACK
-        # -------------------------------------------------
 
         await bot.send_message(
             chat_id=target,
@@ -2315,7 +2317,7 @@ async def news_command(
 
 
 # =========================================================
-# IMPORTANT
+# IMPORTANT COMMAND
 # =========================================================
 
 async def important_command(
@@ -2339,9 +2341,13 @@ async def important_command(
             article
             for article in articles
             if article.get(
-                "important",
-                False,
+                "level",
+                "NORMAL",
             )
+            in {
+                "URGENT",
+                "IMPORTANT",
+            }
         ]
 
         if not important_articles:
@@ -2397,6 +2403,7 @@ async def testpost_command(
             "ارسال ربات به کانال است."
         ),
         "source": "Vexa",
+        "level": "NORMAL",
         "important": False,
         "image_url": "",
     }
@@ -2438,7 +2445,7 @@ async def testpost_command(
 
 
 # =========================================================
-# BUTTONS
+# BUTTON HANDLER
 # =========================================================
 
 async def button_handler(
@@ -2619,20 +2626,35 @@ async def daily_digest_job(
 
             return
 
+        urgent = [
+            article
+            for article in articles
+            if article.get(
+                "level",
+                "NORMAL",
+            )
+            == "URGENT"
+        ]
+
         important = [
             article
             for article in articles
             if article.get(
-                "important",
-                False,
+                "level",
+                "NORMAL",
             )
+            == "IMPORTANT"
         ]
 
         selected = (
-            important[:5]
-            if important
-            else articles[:5]
+            urgent[:3]
+            +
+            important[:3]
         )
+
+        if not selected:
+
+            selected = articles[:5]
 
         lines = [
             "🌙 خلاصه اخبار فوتبال امروز",
@@ -2651,8 +2673,25 @@ async def daily_digest_job(
                 )
             )
 
+            level = article.get(
+                "level",
+                "NORMAL",
+            )
+
+            if level == "URGENT":
+
+                icon = "🚨"
+
+            elif level == "IMPORTANT":
+
+                icon = "🔥"
+
+            else:
+
+                icon = "⚽"
+
             lines.append(
-                f"{index}. {title}"
+                f"{icon} {index}. {title}"
             )
 
         digest_text = (
@@ -2769,6 +2808,14 @@ def main():
     )
 
     print(
+        "IMPORTANCE SYSTEM:"
+    )
+
+    print(
+        "URGENT / IMPORTANT / NORMAL"
+    )
+
+    print(
         "===================================="
     )
 
@@ -2817,7 +2864,7 @@ def main():
         )
     )
 
-    # Keyboard
+    # Buttons
     application.add_handler(
         MessageHandler(
             filters.TEXT
@@ -2826,7 +2873,7 @@ def main():
         )
     )
 
-    # Automatic jobs
+    # Jobs
     if application.job_queue:
 
         application.job_queue.run_repeating(
