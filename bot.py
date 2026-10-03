@@ -9,7 +9,6 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, time
 from io import BytesIO
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import feedparser
@@ -42,25 +41,26 @@ CHANNEL_USERNAME = "@fcnewsss"
 
 AI_MODEL = "gpt-6-luna"
 
-NEWS_INTERVAL = 600          # هر 10 دقیقه
-FIRST_NEWS_DELAY = 30        # اولین بررسی 30 ثانیه بعد از روشن شدن
+NEWS_INTERVAL = 600
+FIRST_NEWS_DELAY = 30
 
 DAILY_DIGEST_HOUR = 21
 DAILY_DIGEST_MINUTE = 0
 
 LOCAL_TZ = ZoneInfo("Europe/Budapest")
 
-STATE_FILE = Path("vexa_state.json")
+STATE_FILE = "vexa_state.json"
 
 MAX_ARTICLES = 8
 MAX_RECENT_ARTICLES = 200
 
-# حداکثر حجم عکس برای دانلود
-MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_IMAGE_BYTES = 12 * 1024 * 1024
+
+HTTP_TIMEOUT = 15
 
 
 # =========================================================
-# RSS SOURCES
+# RSS
 # =========================================================
 
 RSS_FEEDS = [
@@ -80,7 +80,7 @@ RSS_FEEDS = [
 
 
 # =========================================================
-# GLOBAL STATE
+# GLOBALS
 # =========================================================
 
 sent_links = set()
@@ -97,7 +97,7 @@ openai_client = None
 
 
 # =========================================================
-# TIME / TEXT HELPERS
+# BASIC HELPERS
 # =========================================================
 
 def now_local():
@@ -115,7 +115,9 @@ def clean_html_text(value):
     if not value:
         return ""
 
-    value = html.unescape(str(value))
+    value = html.unescape(
+        str(value)
+    )
 
     value = re.sub(
         r"<br\s*/?>",
@@ -147,7 +149,9 @@ def clean_html_text(value):
 
 
 def normalize_title(title):
-    title = safe_text(title).lower()
+    title = safe_text(
+        title
+    ).lower()
 
     title = re.sub(
         r"https?://\S+",
@@ -179,29 +183,42 @@ def title_words(title):
     }
 
 
-def title_similarity(title1, title2):
-    a = normalize_title(title1)
-    b = normalize_title(title2)
+def title_similarity(
+    title1,
+    title2,
+):
+    a = normalize_title(
+        title1
+    )
+
+    b = normalize_title(
+        title2
+    )
 
     if not a or not b:
         return 0.0
 
-    sequence_score = difflib.SequenceMatcher(
-        None,
-        a,
-        b,
-    ).ratio()
+    sequence_score = (
+        difflib.SequenceMatcher(
+            None,
+            a,
+            b,
+        ).ratio()
+    )
 
     words_a = title_words(a)
     words_b = title_words(b)
 
     if words_a and words_b:
-        jaccard = len(
-            words_a & words_b
-        ) / len(
-            words_a | words_b
+
+        jaccard = (
+            len(words_a & words_b)
+            /
+            len(words_a | words_b)
         )
+
     else:
+
         jaccard = 0.0
 
     return max(
@@ -211,7 +228,9 @@ def title_similarity(title1, title2):
 
 
 def make_content_key(title):
-    normalized = normalize_title(title)
+    normalized = normalize_title(
+        title
+    )
 
     if not normalized:
         return ""
@@ -230,6 +249,7 @@ def canonicalize_url(url):
         return ""
 
     try:
+
         parsed = urllib.parse.urlsplit(
             url.strip()
         )
@@ -253,13 +273,19 @@ def canonicalize_url(url):
         }
 
         filtered = [
-            (key, value)
+            (
+                key,
+                value,
+            )
             for key, value in query
-            if key.lower() not in ignored
+            if key.lower()
+            not in ignored
         ]
 
-        new_query = urllib.parse.urlencode(
-            filtered
+        new_query = (
+            urllib.parse.urlencode(
+                filtered
+            )
         )
 
         return urllib.parse.urlunsplit(
@@ -273,6 +299,7 @@ def canonicalize_url(url):
         )
 
     except Exception:
+
         return url.strip()
 
 
@@ -281,21 +308,31 @@ def canonicalize_url(url):
 # =========================================================
 
 def load_state():
+
     global sent_links
     global sent_title_keys
     global sent_content_keys
     global users
     global last_digest_date
 
-    if not STATE_FILE.exists():
-        print("STATE: no state file found.")
+    if not os.path.exists(
+        STATE_FILE
+    ):
+
+        print(
+            "STATE: no state file."
+        )
+
         return
 
     try:
-        with STATE_FILE.open(
+
+        with open(
+            STATE_FILE,
             "r",
             encoding="utf-8",
         ) as f:
+
             data = json.load(f)
 
         sent_links = set(
@@ -332,12 +369,13 @@ def load_state():
         print(
             "STATE LOADED:",
             len(sent_links),
-            "links,",
+            "links",
             len(sent_title_keys),
             "titles",
         )
 
     except Exception as e:
+
         print(
             "STATE LOAD ERROR:",
             type(e).__name__,
@@ -346,6 +384,7 @@ def load_state():
 
 
 def save_state():
+
     data = {
         "sent_links": list(
             sent_links
@@ -357,14 +396,19 @@ def save_state():
             sent_content_keys
         )[-5000:],
         "users": users,
-        "last_digest_date": last_digest_date,
+        "last_digest_date": (
+            last_digest_date
+        ),
     }
 
     try:
-        with STATE_FILE.open(
+
+        with open(
+            STATE_FILE,
             "w",
             encoding="utf-8",
         ) as f:
+
             json.dump(
                 data,
                 f,
@@ -373,6 +417,7 @@ def save_state():
             )
 
     except Exception as e:
+
         print(
             "STATE SAVE ERROR:",
             type(e).__name__,
@@ -381,7 +426,7 @@ def save_state():
 
 
 # =========================================================
-# DUPLICATE CHECK
+# DUPLICATE
 # =========================================================
 
 def is_duplicate_article(
@@ -390,6 +435,7 @@ def is_duplicate_article(
     source=None,
     existing_articles=None,
 ):
+
     canonical_link = canonicalize_url(
         link
     )
@@ -402,7 +448,6 @@ def is_duplicate_article(
         title
     )
 
-    # فقط خبرهایی که واقعاً قبلاً ارسال شده‌اند
     if (
         canonical_link
         and canonical_link in sent_links
@@ -421,7 +466,6 @@ def is_duplicate_article(
     ):
         return True
 
-    # duplicate داخل همین batch
     if existing_articles is not None:
 
         for article in existing_articles:
@@ -436,7 +480,8 @@ def is_duplicate_article(
             if (
                 canonical_link
                 and old_link
-                and canonical_link == old_link
+                and canonical_link
+                == old_link
             ):
                 return True
 
@@ -452,16 +497,20 @@ def is_duplicate_article(
                 )
             )
 
-            if title_similarity(
-                title,
-                old_title,
-            ) >= 0.90:
+            if (
+                title_similarity(
+                    title,
+                    old_title,
+                )
+                >= 0.90
+            ):
                 return True
 
     return False
 
 
 def mark_article_sent(article):
+
     link = canonicalize_url(
         article.get(
             "link",
@@ -506,23 +555,158 @@ def mark_article_sent(article):
 
 
 # =========================================================
-# IMAGE EXTRACTION FROM RSS
+# HTTP
 # =========================================================
 
-def extract_image_from_entry(entry):
-    """
-    تلاش می‌کند عکس خبر را از چند فرمت مختلف RSS پیدا کند.
-    """
+def make_request(
+    url,
+    accept="*/*",
+):
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/128.0 Safari/537.36"
+        ),
+        "Accept": accept,
+        "Accept-Language": (
+            "en-US,en;q=0.9"
+        ),
+        "Referer": (
+            "https://www.google.com/"
+        ),
+    }
+
+    return urllib.request.Request(
+        url,
+        headers=headers,
+    )
+
+
+def fetch_url_bytes_sync(
+    url,
+    max_bytes=MAX_IMAGE_BYTES,
+):
 
     try:
+
+        request = make_request(
+            url
+        )
+
+        with urllib.request.urlopen(
+            request,
+            timeout=HTTP_TIMEOUT,
+        ) as response:
+
+            content_type = safe_text(
+                response.headers.get(
+                    "Content-Type",
+                    "",
+                )
+            ).lower()
+
+            data = response.read(
+                max_bytes + 1
+            )
+
+            if (
+                len(data)
+                > max_bytes
+            ):
+                return None, content_type
+
+            return data, content_type
+
+    except Exception as e:
+
+        print(
+            "HTTP ERROR:",
+            type(e).__name__,
+            e,
+        )
+
+        return None, ""
+
+
+# =========================================================
+# IMAGE URL EXTRACTION
+# =========================================================
+
+def normalize_image_url(
+    image_url,
+    base_url,
+):
+
+    if not image_url:
+        return None
+
+    image_url = (
+        image_url
+        .strip()
+        .replace(
+            "&amp;",
+            "&",
+        )
+    )
+
+    if image_url.startswith(
+        "//"
+    ):
+
+        parsed = urllib.parse.urlsplit(
+            base_url
+        )
+
+        image_url = (
+            parsed.scheme
+            + ":"
+            + image_url
+        )
+
+    elif image_url.startswith(
+        "/"
+    ):
+
+        image_url = urllib.parse.urljoin(
+            base_url,
+            image_url,
+        )
+
+    elif not image_url.startswith(
+        (
+            "http://",
+            "https://",
+        )
+    ):
+
+        image_url = urllib.parse.urljoin(
+            base_url,
+            image_url,
+        )
+
+    return image_url
+
+
+def extract_image_from_entry(
+    entry
+):
+
+    try:
+
         # -------------------------------------------------
-        # 1. media_content
+        # media_content
         # -------------------------------------------------
 
         media_content = entry.get(
             "media_content",
             [],
         )
+
+        candidates = []
 
         for media in media_content:
 
@@ -533,19 +717,46 @@ def extract_image_from_entry(entry):
                 )
             )
 
+            width = media.get(
+                "width",
+                0,
+            )
+
+            try:
+                width = int(width)
+            except Exception:
+                width = 0
+
             if url:
-                return url
+
+                candidates.append(
+                    (
+                        width,
+                        url,
+                    )
+                )
+
+        if candidates:
+
+            candidates.sort(
+                key=lambda x: x[0],
+                reverse=True,
+            )
+
+            return candidates[0][1]
 
         # -------------------------------------------------
-        # 2. media_thumbnail
+        # media_thumbnail
         # -------------------------------------------------
 
-        media_thumbnail = entry.get(
+        thumbnails = entry.get(
             "media_thumbnail",
             [],
         )
 
-        for media in media_thumbnail:
+        candidates = []
+
+        for media in thumbnails:
 
             url = safe_text(
                 media.get(
@@ -554,63 +765,87 @@ def extract_image_from_entry(entry):
                 )
             )
 
-            if url:
-                return url
-
-        # -------------------------------------------------
-        # 3. enclosures
-        # -------------------------------------------------
-
-        enclosures = entry.get(
-            "enclosures",
-            [],
-        )
-
-        for enclosure in enclosures:
-
-            url = safe_text(
-                enclosure.get(
-                    "href",
-                    "",
-                )
+            width = media.get(
+                "width",
+                0,
             )
 
-            if not url:
-                url = safe_text(
+            try:
+                width = int(width)
+            except Exception:
+                width = 0
+
+            if url:
+
+                candidates.append(
+                    (
+                        width,
+                        url,
+                    )
+                )
+
+        if candidates:
+
+            candidates.sort(
+                key=lambda x: x[0],
+                reverse=True,
+            )
+
+            return candidates[0][1]
+
+        # -------------------------------------------------
+        # enclosure
+        # -------------------------------------------------
+
+        for enclosure in entry.get(
+            "enclosures",
+            [],
+        ):
+
+            url = (
+                safe_text(
+                    enclosure.get(
+                        "href",
+                        "",
+                    )
+                )
+                or
+                safe_text(
                     enclosure.get(
                         "url",
                         "",
                     )
                 )
+            )
 
-            media_type = safe_text(
+            content_type = safe_text(
                 enclosure.get(
                     "type",
                     "",
                 )
-            )
+            ).lower()
 
             if (
                 url
                 and (
-                    media_type.startswith(
+                    not content_type
+                    or
+                    content_type.startswith(
                         "image/"
                     )
-                    or not media_type
                 )
             ):
+
                 return url
 
         # -------------------------------------------------
-        # 4. links with image type
+        # entry links
         # -------------------------------------------------
 
-        links = entry.get(
+        for item in entry.get(
             "links",
             [],
-        )
-
-        for item in links:
+        ):
 
             url = safe_text(
                 item.get(
@@ -619,70 +854,26 @@ def extract_image_from_entry(entry):
                 )
             )
 
-            media_type = safe_text(
+            content_type = safe_text(
                 item.get(
                     "type",
                     "",
                 )
-            )
-
-            rel = safe_text(
-                item.get(
-                    "rel",
-                    "",
-                )
-            )
+            ).lower()
 
             if (
                 url
-                and (
-                    media_type.startswith(
-                        "image/"
-                    )
-                    or rel == "enclosure"
+                and content_type.startswith(
+                    "image/"
                 )
             ):
+
                 return url
-
-        # -------------------------------------------------
-        # 5. direct image fields
-        # -------------------------------------------------
-
-        for key in [
-            "image",
-            "image_url",
-            "thumbnail",
-            "thumb",
-        ]:
-
-            value = entry.get(
-                key,
-                "",
-            )
-
-            if isinstance(
-                value,
-                dict,
-            ):
-                value = (
-                    value.get("href")
-                    or
-                    value.get("url")
-                    or
-                    value.get("src")
-                )
-
-            value = safe_text(
-                value
-            )
-
-            if value:
-                return value
 
     except Exception as e:
 
         print(
-            "IMAGE EXTRACTION ERROR:",
+            "RSS IMAGE ERROR:",
             type(e).__name__,
             e,
         )
@@ -691,10 +882,500 @@ def extract_image_from_entry(entry):
 
 
 # =========================================================
+# HTML IMAGE EXTRACTION
+# =========================================================
+
+def extract_meta_image(
+    html_text,
+    page_url,
+):
+
+    if not html_text:
+        return None
+
+    candidates = []
+
+    # -----------------------------------------------------
+    # og:image
+    # -----------------------------------------------------
+
+    patterns = [
+        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
+
+        r'<meta[^>]+property=["\']og:image:secure_url["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image:secure_url["\']',
+
+        r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
+
+        r'<meta[^>]+name=["\']twitter:image:src["\'][^>]+content=["\']([^"\']+)["\']',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image:src["\']',
+    ]
+
+    for pattern in patterns:
+
+        matches = re.findall(
+            pattern,
+            html_text,
+            flags=re.IGNORECASE,
+        )
+
+        for value in matches:
+
+            value = normalize_image_url(
+                value,
+                page_url,
+            )
+
+            if value:
+                candidates.append(
+                    value
+                )
+
+    # -----------------------------------------------------
+    # link rel=image_src
+    # -----------------------------------------------------
+
+    link_patterns = [
+        r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\']([^"\']+)["\']',
+        r'<link[^>]+href=["\']([^"\']+)["\'][^>]+rel=["\']image_src["\']',
+    ]
+
+    for pattern in link_patterns:
+
+        matches = re.findall(
+            pattern,
+            html_text,
+            flags=re.IGNORECASE,
+        )
+
+        for value in matches:
+
+            value = normalize_image_url(
+                value,
+                page_url,
+            )
+
+            if value:
+                candidates.append(
+                    value
+                )
+
+    if candidates:
+
+        # حذف duplicate
+        unique = []
+
+        for item in candidates:
+
+            if item not in unique:
+                unique.append(item)
+
+        return unique[0]
+
+    return None
+
+
+def extract_srcset_images(
+    html_text,
+    page_url,
+):
+
+    if not html_text:
+        return []
+
+    results = []
+
+    # srcset
+    matches = re.findall(
+        r'(?:srcset|data-srcset)=["\']([^"\']+)["\']',
+        html_text,
+        flags=re.IGNORECASE,
+    )
+
+    for srcset in matches:
+
+        for item in srcset.split(","):
+
+            item = item.strip()
+
+            if not item:
+                continue
+
+            parts = item.split()
+
+            url = parts[0]
+
+            width = 0
+
+            if len(parts) > 1:
+
+                match = re.search(
+                    r"(\d+)w",
+                    parts[1],
+                )
+
+                if match:
+
+                    try:
+                        width = int(
+                            match.group(1)
+                        )
+                    except Exception:
+                        width = 0
+
+            url = normalize_image_url(
+                url,
+                page_url,
+            )
+
+            if url:
+
+                results.append(
+                    (
+                        width,
+                        url,
+                    )
+                )
+
+    results.sort(
+        key=lambda x: x[0],
+        reverse=True,
+    )
+
+    return [
+        url
+        for width, url
+        in results
+    ]
+
+
+def extract_html_image_urls(
+    html_text,
+    page_url,
+):
+
+    if not html_text:
+        return []
+
+    candidates = []
+
+    # عکس‌هایی که معمولاً تصویر اصلی مقاله هستند
+    patterns = [
+        r'<img[^>]+(?:src|data-src)=["\']([^"\']+)["\']',
+        r'<source[^>]+(?:src|data-src)=["\']([^"\']+)["\']',
+    ]
+
+    for pattern in patterns:
+
+        matches = re.findall(
+            pattern,
+            html_text,
+            flags=re.IGNORECASE,
+        )
+
+        for value in matches:
+
+            value = normalize_image_url(
+                value,
+                page_url,
+            )
+
+            if value:
+                candidates.append(
+                    value
+                )
+
+    # srcsetهای بزرگ
+    candidates.extend(
+        extract_srcset_images(
+            html_text,
+            page_url,
+        )
+    )
+
+    # حذف duplicate
+    unique = []
+
+    for item in candidates:
+
+        if item not in unique:
+
+            unique.append(
+                item
+            )
+
+    return unique
+
+
+# =========================================================
+# GET HIGH QUALITY IMAGE FROM ARTICLE PAGE
+# =========================================================
+
+def get_article_page_image_sync(
+    article_url,
+    rss_image=None,
+):
+
+    if not article_url:
+        return rss_image
+
+    try:
+
+        print(
+            "IMAGE PAGE CHECK:",
+            article_url,
+        )
+
+        request = make_request(
+            article_url,
+            accept=(
+                "text/html,"
+                "application/xhtml+xml,"
+                "*/*;q=0.8"
+            ),
+        )
+
+        with urllib.request.urlopen(
+            request,
+            timeout=HTTP_TIMEOUT,
+        ) as response:
+
+            content_type = safe_text(
+                response.headers.get(
+                    "Content-Type",
+                    "",
+                )
+            ).lower()
+
+            if (
+                content_type
+                and
+                "text/html"
+                not in content_type
+                and
+                "application/xhtml"
+                not in content_type
+            ):
+
+                print(
+                    "IMAGE PAGE: not HTML"
+                )
+
+                return rss_image
+
+            raw = response.read(
+                3 * 1024 * 1024
+            )
+
+            page_url = response.geturl()
+
+        page = raw.decode(
+            "utf-8",
+            errors="ignore",
+        )
+
+        # -------------------------------------------------
+        # 1. بهترین گزینه: og:image
+        # -------------------------------------------------
+
+        og_image = extract_meta_image(
+            page,
+            page_url,
+        )
+
+        if og_image:
+
+            print(
+                "HIGH QUALITY IMAGE:",
+                og_image,
+            )
+
+            return og_image
+
+        # -------------------------------------------------
+        # 2. srcset بزرگ
+        # -------------------------------------------------
+
+        srcset_images = (
+            extract_srcset_images(
+                page,
+                page_url,
+            )
+        )
+
+        if srcset_images:
+
+            print(
+                "SRCSET IMAGE:",
+                srcset_images[0],
+            )
+
+            return srcset_images[0]
+
+        # -------------------------------------------------
+        # 3. image tags
+        # -------------------------------------------------
+
+        html_images = (
+            extract_html_image_urls(
+                page,
+                page_url,
+            )
+        )
+
+        if html_images:
+
+            print(
+                "HTML IMAGE:",
+                html_images[0],
+            )
+
+            return html_images[0]
+
+    except Exception as e:
+
+        print(
+            "ARTICLE IMAGE ERROR:",
+            type(e).__name__,
+            e,
+        )
+
+    return rss_image
+
+
+async def get_best_image_url(
+    article_url,
+    rss_image,
+):
+
+    return await asyncio.to_thread(
+        get_article_page_image_sync,
+        article_url,
+        rss_image,
+    )
+
+
+# =========================================================
+# DOWNLOAD IMAGE
+# =========================================================
+
+def download_image_sync(
+    image_url,
+):
+
+    if not image_url:
+        return None
+
+    try:
+
+        print(
+            "DOWNLOADING IMAGE:",
+            image_url,
+        )
+
+        request = make_request(
+            image_url,
+            accept=(
+                "image/avif,"
+                "image/webp,"
+                "image/apng,"
+                "image/svg+xml,"
+                "image/*,"
+                "*/*;q=0.8"
+            ),
+        )
+
+        with urllib.request.urlopen(
+            request,
+            timeout=HTTP_TIMEOUT,
+        ) as response:
+
+            content_type = safe_text(
+                response.headers.get(
+                    "Content-Type",
+                    "",
+                )
+            ).lower()
+
+            data = response.read(
+                MAX_IMAGE_BYTES + 1
+            )
+
+            if len(data) > MAX_IMAGE_BYTES:
+
+                print(
+                    "IMAGE TOO LARGE"
+                )
+
+                return None
+
+            if not data:
+                return None
+
+            # بعض سایت‌ها Content-Type اشتباه می‌دهند؛
+            # بنابراین فقط با Content-Type رد نمی‌کنیم.
+            if (
+                content_type
+                and
+                not content_type.startswith(
+                    "image/"
+                )
+            ):
+
+                # اگر واقعاً HTML بود، عکس نیست.
+                if (
+                    b"<html"
+                    in data[:5000].lower()
+                    or
+                    b"<!doctype"
+                    in data[:5000].lower()
+                ):
+
+                    print(
+                        "DOWNLOADED FILE IS HTML"
+                    )
+
+                    return None
+
+            print(
+                "IMAGE DOWNLOADED:",
+                len(data),
+                "bytes",
+            )
+
+            return data
+
+    except Exception as e:
+
+        print(
+            "IMAGE DOWNLOAD ERROR:",
+            type(e).__name__,
+            e,
+        )
+
+        return None
+
+
+async def download_image(
+    image_url,
+):
+
+    return await asyncio.to_thread(
+        download_image_sync,
+        image_url,
+    )
+
+
+# =========================================================
 # RSS
 # =========================================================
 
-def parse_feed(feed_info):
+def parse_feed(
+    feed_info,
+):
+
     try:
 
         print(
@@ -738,11 +1419,17 @@ def parse_feed(feed_info):
                 )
             )
 
-            image_url = extract_image_from_entry(
-                entry
+            rss_image = (
+                extract_image_from_entry(
+                    entry
+                )
             )
 
-            if not title or not link:
+            if (
+                not title
+                or
+                not link
+            ):
                 continue
 
             articles.append(
@@ -752,7 +1439,8 @@ def parse_feed(feed_info):
                     "link": link,
                     "summary_original": summary,
                     "published": published,
-                    "image_url": image_url,
+                    "rss_image": rss_image,
+                    "image_url": None,
                 }
             )
 
@@ -779,6 +1467,7 @@ def parse_feed(feed_info):
 
 
 async def collect_raw_articles():
+
     all_articles = []
 
     for feed_info in RSS_FEEDS:
@@ -827,11 +1516,14 @@ async def collect_raw_articles():
             article
         )
 
-        if len(unique) >= MAX_ARTICLES:
+        if (
+            len(unique)
+            >= MAX_ARTICLES
+        ):
             break
 
     print(
-        "RSS: TOTAL NEW:",
+        "RSS TOTAL NEW:",
         len(unique),
     )
 
@@ -856,16 +1548,19 @@ def get_openai_client():
 
             return None
 
-        openai_client = AsyncOpenAI(
-            api_key=OPENAI_API_KEY
+        openai_client = (
+            AsyncOpenAI(
+                api_key=OPENAI_API_KEY
+            )
         )
 
     return openai_client
 
 
 async def translate_and_classify(
-    articles
+    articles,
 ):
+
     client = get_openai_client()
 
     if not client:
@@ -875,14 +1570,18 @@ async def translate_and_classify(
 
     for article in articles:
 
-        original_title = article.get(
-            "title_original",
-            "",
+        original_title = (
+            article.get(
+                "title_original",
+                "",
+            )
         )
 
-        original_summary = article.get(
-            "summary_original",
-            "",
+        original_summary = (
+            article.get(
+                "summary_original",
+                "",
+            )
         )
 
         prompt = f"""
@@ -891,14 +1590,14 @@ You are the editor of a Persian football news Telegram channel.
 Rewrite the following football news in natural Persian.
 
 Rules:
-- Do not invent information.
+- Do not invent facts.
 - Keep important facts accurate.
 - Make the headline short and engaging.
 - Make the body suitable for Telegram.
 - Use 2 to 4 short paragraphs.
 - Do not include the source URL.
 - Do not add your own opinion.
-- Determine whether this is an important/breaking football news item.
+- Determine whether this is important football news.
 
 Return EXACTLY:
 
@@ -923,9 +1622,11 @@ ORIGINAL SUMMARY:
 
         try:
 
-            response = await client.responses.create(
-                model=AI_MODEL,
-                input=prompt,
+            response = (
+                await client.responses.create(
+                    model=AI_MODEL,
+                    input=prompt,
+                )
             )
 
             output = safe_text(
@@ -939,7 +1640,7 @@ ORIGINAL SUMMARY:
             if not output:
 
                 print(
-                    "AI: empty response"
+                    "AI EMPTY"
                 )
 
                 continue
@@ -953,7 +1654,11 @@ ORIGINAL SUMMARY:
             text_match = re.search(
                 r"TEXT:\s*(.*?)(?:\nIMPORTANT:|$)",
                 output,
-                flags=re.IGNORECASE | re.DOTALL,
+                flags=(
+                    re.IGNORECASE
+                    |
+                    re.DOTALL
+                ),
             )
 
             important_match = re.search(
@@ -962,27 +1667,41 @@ ORIGINAL SUMMARY:
                 flags=re.IGNORECASE,
             )
 
-            translated_title = (
-                safe_text(
-                    title_match.group(1)
-                )
-                if title_match
-                else original_title
-            )
+            if title_match:
 
-            translated_text = (
-                safe_text(
-                    text_match.group(1)
+                translated_title = (
+                    safe_text(
+                        title_match.group(1)
+                    )
                 )
-                if text_match
-                else original_summary
-            )
+
+            else:
+
+                translated_title = (
+                    original_title
+                )
+
+            if text_match:
+
+                translated_text = (
+                    safe_text(
+                        text_match.group(1)
+                    )
+                )
+
+            else:
+
+                translated_text = (
+                    original_summary
+                )
 
             important = False
 
             if important_match:
+
                 important = (
-                    important_match.group(1).upper()
+                    important_match.group(1)
+                    .upper()
                     == "YES"
                 )
 
@@ -1015,7 +1734,6 @@ ORIGINAL SUMMARY:
                 e,
             )
 
-            # حتی اگر AI خطا داد، خبر از دست نرود
             article["title"] = (
                 original_title
             )
@@ -1023,7 +1741,7 @@ ORIGINAL SUMMARY:
             article["text"] = (
                 original_summary
                 or
-                "برای این خبر توضیحات بیشتری در منبع منتشر شده است."
+                "برای این خبر اطلاعات بیشتری در منبع اصلی منتشر شده است."
             )
 
             article["important"] = False
@@ -1036,97 +1754,139 @@ ORIGINAL SUMMARY:
 
 
 # =========================================================
-# IMAGE DOWNLOAD
+# PREPARE BEST IMAGES
 # =========================================================
 
-def download_image_sync(url):
-    """
-    عکس را از اینترنت دانلود می‌کند تا مستقیماً
-    به تلگرام Upload شود.
-    """
+async def prepare_article_images(
+    articles,
+):
 
-    if not url:
-        return None
-
-    try:
-
-        request = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 "
-                    "(Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 "
-                    "Chrome/120 Safari/537.36"
-                )
-            },
-        )
-
-        with urllib.request.urlopen(
-            request,
-            timeout=12,
-        ) as response:
-
-            content_type = safe_text(
-                response.headers.get(
-                    "Content-Type",
-                    "",
-                )
-            ).lower()
-
-            if (
-                content_type
-                and not content_type.startswith(
-                    "image/"
-                )
-            ):
-                print(
-                    "IMAGE SKIPPED: not image:",
-                    content_type,
-                )
-
-                return None
-
-            data = response.read(
-                MAX_IMAGE_BYTES + 1
-            )
-
-            if len(data) > MAX_IMAGE_BYTES:
-
-                print(
-                    "IMAGE SKIPPED: too large"
-                )
-
-                return None
-
-            if not data:
-                return None
-
-            return data
-
-    except Exception as e:
-
-        print(
-            "IMAGE DOWNLOAD ERROR:",
-            type(e).__name__,
-            e,
-        )
-
-        return None
-
-
-async def download_image(url):
-    return await asyncio.to_thread(
-        download_image_sync,
-        url,
+    print(
+        "IMAGE SYSTEM: finding original images..."
     )
 
+    for article in articles:
+
+        article_url = safe_text(
+            article.get(
+                "link",
+                "",
+            )
+        )
+
+        rss_image = safe_text(
+            article.get(
+                "rss_image",
+                "",
+            )
+        )
+
+        # اول صفحه اصلی خبر را بررسی می‌کنیم
+        best_image = (
+            await get_best_image_url(
+                article_url,
+                rss_image,
+            )
+        )
+
+        article["image_url"] = (
+            best_image
+        )
+
+        if best_image:
+
+            print(
+                "FINAL IMAGE:",
+                best_image,
+            )
+
+        else:
+
+            print(
+                "NO IMAGE FOUND:",
+                article_url,
+            )
+
+    return articles
+
 
 # =========================================================
-# TELEGRAM POST TEXT
+# PIPELINE
 # =========================================================
 
-def build_post_text(article):
+async def get_news_pipeline(
+    max_articles=MAX_ARTICLES,
+):
+
+    articles = await collect_raw_articles()
+
+    if not articles:
+        return []
+
+    articles = articles[
+        :max_articles
+    ]
+
+    translated = (
+        await translate_and_classify(
+            articles
+        )
+    )
+
+    # پیدا کردن عکس باکیفیت
+    translated = (
+        await prepare_article_images(
+            translated
+        )
+    )
+
+    global recent_articles
+
+    recent_articles = (
+        translated
+        + recent_articles
+    )
+
+    unique = {}
+
+    for article in recent_articles:
+
+        key = canonicalize_url(
+            article.get(
+                "link",
+                "",
+            )
+        )
+
+        if not key:
+
+            key = normalize_title(
+                article.get(
+                    "title",
+                    "",
+                )
+            )
+
+        if key:
+
+            unique[key] = article
+
+    recent_articles = list(
+        unique.values()
+    )[
+        :MAX_RECENT_ARTICLES
+    ]
+
+    return translated
+
+
+# =========================================================
+# POST TEXT
+# =========================================================
+
+def build_post_text(
+    article,
+):
 
     title = safe_text(
         article.get(
@@ -1155,22 +1915,23 @@ def build_post_text(article):
     )
 
     if important:
+
         prefix = "🚨 خبر مهم"
+
     else:
+
         prefix = "⚽ خبر فوتبال"
 
-    post = (
+    return (
         f"{prefix}\n\n"
         f"🔥 {title}\n\n"
         f"{text}\n\n"
         f"📰 منبع: {source}"
     )
 
-    return post
-
 
 # =========================================================
-# POST ARTICLE
+# TELEGRAM POST
 # =========================================================
 
 async def post_article(
@@ -1178,6 +1939,7 @@ async def post_article(
     article,
     target,
 ):
+
     try:
 
         text = build_post_text(
@@ -1191,19 +1953,21 @@ async def post_article(
             )
         )
 
-        # =================================================
-        # اول تلاش برای ارسال عکس
-        # =================================================
+        # -------------------------------------------------
+        # PHOTO
+        # -------------------------------------------------
 
         if image_url:
 
             print(
-                "IMAGE FOUND:",
-                image_url[:150],
+                "POST IMAGE:",
+                image_url,
             )
 
-            image_data = await download_image(
-                image_url
+            image_data = (
+                await download_image(
+                    image_url
+                )
             )
 
             if image_data:
@@ -1211,12 +1975,18 @@ async def post_article(
                 try:
 
                     photo = InputFile(
-                        BytesIO(image_data),
-                        filename="vexa_news.jpg",
+                        BytesIO(
+                            image_data
+                        ),
+                        filename=(
+                            "vexa_news.jpg"
+                        ),
                     )
 
-                    # کپشن تلگرام حداکثر 1024 کاراکتر
-                    caption = text[:1024]
+                    # Telegram caption limit
+                    caption = text[
+                        :1024
+                    ]
 
                     await bot.send_photo(
                         chat_id=target,
@@ -1225,11 +1995,10 @@ async def post_article(
                     )
 
                     print(
-                        "POST: photo sent successfully."
+                        "PHOTO POST SUCCESS"
                     )
 
-                    # اگر متن بیشتر از محدودیت کپشن بود،
-                    # ادامه متن را جداگانه بفرست.
+                    # ادامه متن در صورت نیاز
                     if len(text) > 1024:
 
                         await bot.send_message(
@@ -1251,12 +2020,12 @@ async def post_article(
             else:
 
                 print(
-                    "IMAGE DOWNLOAD FAILED -> TEXT FALLBACK"
+                    "IMAGE FAILED -> TEXT FALLBACK"
                 )
 
-        # =================================================
-        # اگر عکس نشد، متن ارسال شود
-        # =================================================
+        # -------------------------------------------------
+        # TEXT FALLBACK
+        # -------------------------------------------------
 
         await bot.send_message(
             chat_id=target,
@@ -1265,7 +2034,7 @@ async def post_article(
         )
 
         print(
-            "POST: text sent successfully."
+            "TEXT POST SUCCESS"
         )
 
         return True
@@ -1282,64 +2051,7 @@ async def post_article(
 
 
 # =========================================================
-# NEWS PIPELINE
-# =========================================================
-
-async def get_news_pipeline(
-    max_articles=MAX_ARTICLES,
-):
-    articles = await collect_raw_articles()
-
-    if not articles:
-        return []
-
-    articles = articles[:max_articles]
-
-    translated = await translate_and_classify(
-        articles
-    )
-
-    global recent_articles
-
-    # فقط تاریخچه داخلی است.
-    # نباید جلوی ارسال خبر تازه را بگیرد.
-    recent_articles = (
-        translated
-        + recent_articles
-    )
-
-    unique = {}
-
-    for article in recent_articles:
-
-        key = canonicalize_url(
-            article.get(
-                "link",
-                "",
-            )
-        )
-
-        if not key:
-
-            key = normalize_title(
-                article.get(
-                    "title",
-                    "",
-                )
-            )
-
-        if key:
-            unique[key] = article
-
-    recent_articles = list(
-        unique.values()
-    )[:MAX_RECENT_ARTICLES]
-
-    return translated
-
-
-# =========================================================
-# PUBLISH TO CHANNEL
+# PUBLISH
 # =========================================================
 
 async def publish_news(
@@ -1347,10 +2059,13 @@ async def publish_news(
     bot,
     target=CHANNEL_USERNAME,
 ):
+
     posted = 0
 
     print(
-        f"PUBLISH: {len(articles)} articles ready."
+        "PUBLISH:",
+        len(articles),
+        "articles ready.",
     )
 
     for article in articles:
@@ -1362,21 +2077,15 @@ async def publish_news(
             )
         )
 
-        original_title = safe_text(
+        title = (
             article.get(
                 "title_original",
                 "",
             )
-        )
-
-        title = (
-            original_title
             or
-            safe_text(
-                article.get(
-                    "title",
-                    "",
-                )
+            article.get(
+                "title",
+                "",
             )
         )
 
@@ -1388,8 +2097,6 @@ async def publish_news(
             title
         )
 
-        # فقط چیزهایی که قبلاً واقعاً
-        # در کانال ارسال شده‌اند.
         if (
             (
                 link
@@ -1398,12 +2105,14 @@ async def publish_news(
             or
             (
                 title_key
-                and title_key in sent_title_keys
+                and title_key
+                in sent_title_keys
             )
             or
             (
                 content_key
-                and content_key in sent_content_keys
+                and content_key
+                in sent_content_keys
             )
         ):
 
@@ -1419,13 +2128,13 @@ async def publish_news(
             title,
         )
 
-        ok = await post_article(
+        success = await post_article(
             bot,
             article,
             target,
         )
 
-        if ok:
+        if success:
 
             mark_article_sent(
                 article
@@ -1450,7 +2159,9 @@ async def publish_news(
         )
 
     print(
-        f"PUBLISH FINISHED: {posted} posted."
+        "PUBLISH FINISHED:",
+        posted,
+        "posted.",
     )
 
     return posted
@@ -1484,7 +2195,7 @@ def main_keyboard():
 
 
 # =========================================================
-# /START
+# START
 # =========================================================
 
 async def start_command(
@@ -1513,7 +2224,7 @@ async def start_command(
 
 
 # =========================================================
-# /HELP
+# HELP
 # =========================================================
 
 async def help_command(
@@ -1526,7 +2237,7 @@ async def help_command(
         "/start — شروع ربات\n"
         "/news — اخبار جدید\n"
         "/important — اخبار مهم\n"
-        "/testpost — تست ارسال به کانال\n"
+        "/testpost — تست کانال\n"
         "/help — راهنما",
         reply_markup=main_keyboard(),
     )
@@ -1548,7 +2259,7 @@ async def close_menu(
 
 
 # =========================================================
-# /NEWS
+# NEWS COMMAND
 # =========================================================
 
 async def news_command(
@@ -1562,8 +2273,10 @@ async def news_command(
 
     try:
 
-        articles = await get_news_pipeline(
-            max_articles=5
+        articles = (
+            await get_news_pipeline(
+                max_articles=5
+            )
         )
 
         if not articles:
@@ -1590,7 +2303,7 @@ async def news_command(
     except Exception as e:
 
         print(
-            "NEWS COMMAND ERROR:",
+            "NEWS ERROR:",
             type(e).__name__,
             e,
         )
@@ -1602,7 +2315,7 @@ async def news_command(
 
 
 # =========================================================
-# /IMPORTANT
+# IMPORTANT
 # =========================================================
 
 async def important_command(
@@ -1616,8 +2329,10 @@ async def important_command(
 
     try:
 
-        articles = await get_news_pipeline(
-            max_articles=MAX_ARTICLES
+        articles = (
+            await get_news_pipeline(
+                max_articles=MAX_ARTICLES
+            )
         )
 
         important_articles = [
@@ -1638,7 +2353,9 @@ async def important_command(
 
             return
 
-        for article in important_articles:
+        for article in (
+            important_articles
+        ):
 
             await post_article(
                 context.bot,
@@ -1665,7 +2382,7 @@ async def important_command(
 
 
 # =========================================================
-# /TESTPOST
+# TEST POST
 # =========================================================
 
 async def testpost_command(
@@ -1686,23 +2403,23 @@ async def testpost_command(
 
     try:
 
-        ok = await post_article(
+        success = await post_article(
             context.bot,
             test_article,
             CHANNEL_USERNAME,
         )
 
-        if ok:
+        if success:
 
             await update.message.reply_text(
-                "✅ پیام تست با موفقیت به کانال ارسال شد.",
+                "✅ پیام تست با موفقیت ارسال شد.",
                 reply_markup=main_keyboard(),
             )
 
         else:
 
             await update.message.reply_text(
-                "❌ ارسال پیام تست ناموفق بود.",
+                "❌ ارسال تست ناموفق بود.",
                 reply_markup=main_keyboard(),
             )
 
@@ -1721,7 +2438,7 @@ async def testpost_command(
 
 
 # =========================================================
-# BUTTON HANDLER
+# BUTTONS
 # =========================================================
 
 async def button_handler(
@@ -1806,8 +2523,10 @@ async def automatic_news_job(
 
     try:
 
-        articles = await get_news_pipeline(
-            max_articles=MAX_ARTICLES
+        articles = (
+            await get_news_pipeline(
+                max_articles=MAX_ARTICLES
+            )
         )
 
         if not articles:
@@ -1863,12 +2582,19 @@ async def daily_digest_job(
 
     global last_digest_date
 
-    today = now_local().date().isoformat()
+    today = (
+        now_local()
+        .date()
+        .isoformat()
+    )
 
-    if last_digest_date == today:
+    if (
+        last_digest_date
+        == today
+    ):
 
         print(
-            "DIGEST: already sent today."
+            "DIGEST: already sent."
         )
 
         return
@@ -1879,8 +2605,10 @@ async def daily_digest_job(
 
     try:
 
-        articles = await get_news_pipeline(
-            max_articles=MAX_ARTICLES
+        articles = (
+            await get_news_pipeline(
+                max_articles=MAX_ARTICLES
+            )
         )
 
         if not articles:
@@ -1927,8 +2655,8 @@ async def daily_digest_job(
                 f"{index}. {title}"
             )
 
-        digest_text = "\n".join(
-            lines
+        digest_text = (
+            "\n".join(lines)
         )
 
         await context.bot.send_message(
@@ -1978,7 +2706,7 @@ async def post_init(
             ),
             (
                 "testpost",
-                "تست ارسال به کانال",
+                "تست ارسال",
             ),
             (
                 "help",
@@ -1988,7 +2716,7 @@ async def post_init(
     )
 
     print(
-        "BOT COMMANDS: configured"
+        "BOT COMMANDS CONFIGURED"
     )
 
 
@@ -2034,11 +2762,10 @@ def main():
     print(
         "NEWS INTERVAL:",
         NEWS_INTERVAL,
-        "seconds",
     )
 
     print(
-        "IMAGE SYSTEM: ENABLED"
+        "IMAGE SYSTEM: HIGH QUALITY ENABLED"
     )
 
     print(
@@ -2054,10 +2781,7 @@ def main():
         .build()
     )
 
-    # -----------------------------------------------------
     # Commands
-    # -----------------------------------------------------
-
     application.add_handler(
         CommandHandler(
             "start",
@@ -2093,10 +2817,7 @@ def main():
         )
     )
 
-    # -----------------------------------------------------
     # Keyboard
-    # -----------------------------------------------------
-
     application.add_handler(
         MessageHandler(
             filters.TEXT
@@ -2105,10 +2826,7 @@ def main():
         )
     )
 
-    # -----------------------------------------------------
-    # Job Queue
-    # -----------------------------------------------------
-
+    # Automatic jobs
     if application.job_queue:
 
         application.job_queue.run_repeating(
@@ -2129,17 +2847,13 @@ def main():
         )
 
         print(
-            "JOB QUEUE: automatic news enabled."
-        )
-
-        print(
-            "JOB QUEUE: daily digest enabled."
+            "JOB QUEUE: ENABLED"
         )
 
     else:
 
         print(
-            "WARNING: JobQueue unavailable!"
+            "WARNING: JOB QUEUE UNAVAILABLE"
         )
 
     print(
