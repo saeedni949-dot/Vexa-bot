@@ -20,6 +20,7 @@ from telegram import (
     ReplyKeyboardRemove,
     Update,
 )
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -73,8 +74,6 @@ FOOTBALL_FEEDS = [
 ]
 
 
-# فقط منابع مخصوص نقل‌وانتقالات فوتبال
-# ESPN عمومی عمداً حذف شده
 TRANSFER_FEEDS = [
     {
         "name": "Sky Sports Transfer Centre",
@@ -212,11 +211,13 @@ def clean_text(text):
         return ""
 
     text = html.unescape(text)
+
     text = re.sub(
         r"<[^>]+>",
         " ",
         text,
     )
+
     text = re.sub(
         r"\s+",
         " ",
@@ -394,6 +395,7 @@ TRANSFER_TERMS = [
     "transfer",
     "transfers",
     "signing",
+    "signings",
     "signs",
     "signed",
     "joins",
@@ -546,78 +548,122 @@ def is_football_transfer(article):
 
 
 # =========================================================
-# ENGLISH DETECTION
+# LANGUAGE DETECTION
 # =========================================================
 
-COMMON_ENGLISH_WORDS = {
-    "the",
-    "a",
-    "an",
-    "is",
-    "are",
-    "was",
-    "were",
-    "has",
-    "have",
-    "had",
-    "will",
-    "would",
-    "could",
-    "should",
-    "this",
-    "that",
-    "with",
-    "from",
-    "for",
-    "and",
-    "but",
-    "after",
-    "before",
-    "according",
-    "reports",
-    "report",
-    "says",
-    "said",
-    "club",
-    "player",
-    "football",
-    "transfer",
-    "deal",
-    "sign",
-    "signed",
-    "joins",
-    "joined",
-}
-
-
-def contains_too_much_english(text):
+def language_stats(text):
     if not text:
-        return True
+        return {
+            "persian": 0,
+            "latin": 0,
+            "digits": 0,
+            "letters": 0,
+        }
 
-    words = re.findall(
-        r"\b[a-zA-Z]{2,}\b",
-        text.lower(),
+    persian = len(
+        re.findall(
+            r"[\u0600-\u06FF]",
+            text,
+        )
     )
 
-    if len(words) < 4:
+    latin = len(
+        re.findall(
+            r"[A-Za-z]",
+            text,
+        )
+    )
+
+    digits = len(
+        re.findall(
+            r"\d",
+            text,
+        )
+    )
+
+    letters = persian + latin
+
+    return {
+        "persian": persian,
+        "latin": latin,
+        "digits": digits,
+        "letters": letters,
+    }
+
+
+def is_persian_text(text):
+    """
+    بررسی می‌کند که متن واقعاً فارسی باشد.
+    نام بازیکنان، باشگاه‌ها و کلمات خاص لاتین
+    مجاز هستند؛ ولی متن انگلیسی کامل رد می‌شود.
+    """
+
+    stats = language_stats(text)
+
+    persian = stats["persian"]
+    latin = stats["latin"]
+
+    if persian < 8:
         return False
 
-    common_count = sum(
-        1
-        for word in words
-        if word in COMMON_ENGLISH_WORDS
-    )
-
-    if common_count >= 4:
+    if latin == 0:
         return True
 
-    if (
-        len(words) >= 10
-        and common_count / len(words) >= 0.25
-    ):
+    # اگر متن طولانی است، بخش فارسی باید غالب باشد.
+    if persian >= latin:
+        return True
+
+    # برای متن‌هایی که نام لاتین دارند،
+    # کمی لاتین مجاز است.
+    if persian >= 25 and latin <= persian * 0.45:
         return True
 
     return False
+
+
+# =========================================================
+# PARSE AI FIELDS
+# =========================================================
+
+def extract_ai_field(
+    text,
+    field_name,
+    next_fields=None,
+):
+    if not text:
+        return ""
+
+    if next_fields is None:
+        next_fields = []
+
+    escaped_next = "|".join(
+        re.escape(field)
+        for field in next_fields
+    )
+
+    if escaped_next:
+        pattern = (
+            rf"{re.escape(field_name)}\s*:\s*"
+            rf"(.*?)"
+            rf"(?=\n(?:{escaped_next})\s*:|$)"
+        )
+    else:
+        pattern = (
+            rf"{re.escape(field_name)}\s*:\s*(.*)"
+        )
+
+    match = re.search(
+        pattern,
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    if not match:
+        return ""
+
+    return clean_text(
+        match.group(1)
+    )
 
 
 # =========================================================
@@ -962,6 +1008,126 @@ def mark_transfer_sent(article):
 
 
 # =========================================================
+# UNIVERSAL PERSIAN REWRITE
+# =========================================================
+
+async def force_persian_news(article):
+    """
+    این تابع برای تمام اخبار استفاده می‌شود،
+    نه فقط نقل‌وانتقالات.
+    """
+
+    if not client:
+        return None
+
+    title = clean_text(
+        article.get(
+            "title",
+            "",
+        )
+    )
+
+    summary = clean_text(
+        article.get(
+            "summary",
+            "",
+        )
+    )
+
+    combined = (
+        f"{title}\n{summary}"
+    )
+
+    if is_persian_text(combined):
+        return article
+
+    print(
+        "PERSIAN REWRITE NEEDED:",
+        title,
+    )
+
+    prompt = f"""
+این خبر درباره فوتبال است.
+
+متن زیر ممکن است انگلیسی باشد.
+آن را به فارسی روان، طبیعی و حرفه‌ای برای انتشار در یک کانال خبری فوتبال بازنویسی کن.
+
+عنوان اصلی:
+{title}
+
+متن اصلی:
+{summary}
+
+قوانین بسیار مهم:
+- ترجمه و بازنویسی کامل به فارسی.
+- هیچ جمله انگلیسی در TITLE یا SUMMARY باقی نماند.
+- نام بازیکنان و باشگاه‌ها را می‌توان به شکل رایج فارسی نوشت.
+- اطلاعات جدید یا ساختگی اضافه نکن.
+- معنی خبر را تغییر نده.
+- متن خبری طبیعی و کوتاه باشد.
+
+فقط این دو خط را بده:
+
+TITLE: تیتر فارسی
+SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
+"""
+
+    try:
+        response = await client.responses.create(
+            model=AI_MODEL,
+            input=prompt,
+        )
+
+        text = response.output_text.strip()
+
+        new_title = extract_ai_field(
+            text,
+            "TITLE",
+            ["SUMMARY"],
+        )
+
+        new_summary = extract_ai_field(
+            text,
+            "SUMMARY",
+            [],
+        )
+
+        if not new_title or not new_summary:
+            print(
+                "PERSIAN REWRITE PARSE ERROR:",
+                title,
+            )
+            return None
+
+        combined_new = (
+            f"{new_title}\n{new_summary}"
+        )
+
+        if not is_persian_text(
+            combined_new
+        ):
+            print(
+                "PERSIAN REWRITE FAILED:",
+                new_title,
+            )
+            return None
+
+        return {
+            **article,
+            "title": new_title,
+            "summary": new_summary,
+        }
+
+    except Exception as e:
+        print(
+            "PERSIAN REWRITE ERROR:",
+            e,
+        )
+
+        return None
+
+
+# =========================================================
 # AI NORMAL NEWS
 # =========================================================
 
@@ -980,11 +1146,13 @@ async def classify_normal_news(article):
     prompt = f"""
 تو یک سردبیر حرفه‌ای اخبار فوتبال هستی.
 
-عنوان:
+عنوان اصلی:
 {title}
 
-خلاصه:
+متن خبر:
 {summary}
+
+خبر را فقط برای فوتبال بررسی و به فارسی حرفه‌ای تبدیل کن.
 
 خروجی دقیقاً:
 
@@ -995,12 +1163,13 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
 
 قوانین:
 - فقط فوتبال.
-- خروجی فارسی باشد.
-- خبرهای عادی NORMAL باشند.
-- فقط خبرهای واقعاً فوری URGENT باشند.
-- خبر مهم ولی غیرفوری IMPORTANT باشد.
+- اگر خبر درباره F1، Formula 1، MotoGP یا هر ورزش دیگری است، SPORT: OTHER بنویس.
+- TITLE و SUMMARY حتماً فارسی باشند.
+- متن انگلیسی را کپی نکن.
 - اطلاعات جدید و ساختگی اضافه نکن.
-- اگر خبر مربوط به F1، Formula 1 یا ورزش دیگری است، آن را فوتبال تشخیص نده.
+- خبر عادی NORMAL باشد.
+- فقط خبر واقعاً فوری URGENT باشد.
+- خبر مهم ولی غیرفوری IMPORTANT باشد.
 """
 
     try:
@@ -1011,9 +1180,18 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
 
         text = response.output_text.strip()
 
+        sport_match = re.search(
+            r"SPORT:\s*([A-Z_]+)",
+            text,
+            re.IGNORECASE,
+        )
+
+        if not sport_match:
+            return None
+
         if (
-            "SPORT: FOOTBALL"
-            not in text.upper()
+            sport_match.group(1).upper()
+            != "FOOTBALL"
         ):
             print(
                 "NORMAL SPORT BLOCK:",
@@ -1034,31 +1212,79 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
             else "NORMAL"
         )
 
-        title_match = re.search(
-            r"TITLE:\s*(.+)",
+        new_title = extract_ai_field(
             text,
-            re.IGNORECASE,
+            "TITLE",
+            ["SUMMARY"],
         )
 
-        summary_match = re.search(
-            r"SUMMARY:\s*(.*)",
+        new_summary = extract_ai_field(
             text,
-            re.IGNORECASE | re.DOTALL,
+            "SUMMARY",
+            [],
         )
 
-        if (
-            not title_match
-            or not summary_match
-        ):
+        if not new_title or not new_summary:
+            print(
+                "NORMAL AI PARSE ERROR:",
+                title,
+            )
             return None
 
-        return {
+        result = {
             **article,
-            "title": title_match.group(1).strip(),
-            "summary": summary_match.group(1).strip(),
+            "title": new_title,
+            "summary": new_summary,
             "importance": importance,
             "news_type": "NORMAL",
         }
+
+        # مرحله اجباری فارسی‌سازی
+        result = await force_persian_news(
+            result
+        )
+
+        if not result:
+            return None
+
+        combined = (
+            result.get("title", "")
+            + " "
+            + result.get("summary", "")
+        )
+
+        if not is_persian_text(
+            combined
+        ):
+            print(
+                "NORMAL FINAL LANGUAGE BLOCK:",
+                title,
+            )
+            return None
+
+        # فیلتر نهایی ورزش
+        original_combined = (
+            article.get(
+                "title_original",
+                "",
+            )
+            + " "
+            + article.get(
+                "summary_original",
+                "",
+            )
+        )
+
+        if contains_non_football(
+            original_combined
+        ):
+            print(
+                "NORMAL FINAL SPORT BLOCK:",
+                title,
+            )
+            return None
+
+        return result
 
     except Exception as e:
         print(
@@ -1093,17 +1319,16 @@ async def classify_transfer_news(article):
     prompt = f"""
 تو سردبیر تخصصی نقل‌وانتقالات فوتبال هستی.
 
-عنوان:
+عنوان اصلی:
 {title}
 
-خلاصه:
+متن خبر:
 {summary}
 
 خروجی دقیقاً:
 
 SPORT: FOOTBALL
 IS_TRANSFER: YES یا NO
-LANGUAGE: PERSIAN
 STATUS: OFFICIAL یا AGREEMENT یا NEGOTIATION یا RUMOR یا DENIED
 TYPE: PERMANENT یا LOAN یا FREE یا EXTENSION یا RETURN یا UNKNOWN
 PLAYER: نام بازیکن
@@ -1118,7 +1343,7 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
 - فقط فوتبال.
 - F1، Formula 1، MotoGP، Motorsport و سایر ورزش‌ها ممنوع.
 - اگر انتقال فوتبال نیست IS_TRANSFER: NO.
-- TITLE و SUMMARY حتماً فارسی.
+- TITLE و SUMMARY حتماً فارسی باشند.
 - متن انگلیسی را کپی نکن.
 - اطلاعات ساختگی اضافه نکن.
 - OFFICIAL فقط برای انتقال/تمدید رسمی.
@@ -1175,81 +1400,106 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
             )
             return None
 
-        def extract_field(name):
-            match = re.search(
-                rf"{name}:\s*(.+)",
-                text,
-                re.IGNORECASE,
-            )
-
-            return (
-                match.group(1).strip()
-                if match
-                else "UNKNOWN"
-            )
-
-        status = extract_field(
-            "STATUS"
+        status = extract_ai_field(
+            text,
+            "STATUS",
+            [
+                "TYPE",
+                "PLAYER",
+                "FROM",
+                "TO",
+                "FEE",
+                "CONTRACT",
+                "TITLE",
+                "SUMMARY",
+            ],
         ).upper()
 
-        transfer_type = extract_field(
-            "TYPE"
+        transfer_type = extract_ai_field(
+            text,
+            "TYPE",
+            [
+                "PLAYER",
+                "FROM",
+                "TO",
+                "FEE",
+                "CONTRACT",
+                "TITLE",
+                "SUMMARY",
+            ],
         ).upper()
 
-        player = extract_field(
-            "PLAYER"
-        )
-
-        from_club = extract_field(
-            "FROM"
-        )
-
-        to_club = extract_field(
-            "TO"
-        )
-
-        fee = extract_field(
-            "FEE"
-        )
-
-        contract = extract_field(
-            "CONTRACT"
-        )
-
-        title_match = re.search(
-            r"TITLE:\s*(.+)",
+        player = extract_ai_field(
             text,
-            re.IGNORECASE,
+            "PLAYER",
+            [
+                "FROM",
+                "TO",
+                "FEE",
+                "CONTRACT",
+                "TITLE",
+                "SUMMARY",
+            ],
         )
 
-        summary_match = re.search(
-            r"SUMMARY:\s*(.*)",
+        from_club = extract_ai_field(
             text,
-            re.IGNORECASE | re.DOTALL,
+            "FROM",
+            [
+                "TO",
+                "FEE",
+                "CONTRACT",
+                "TITLE",
+                "SUMMARY",
+            ],
         )
 
-        if (
-            not title_match
-            or not summary_match
-        ):
-            return None
-
-        new_title = (
-            title_match.group(1).strip()
+        to_club = extract_ai_field(
+            text,
+            "TO",
+            [
+                "FEE",
+                "CONTRACT",
+                "TITLE",
+                "SUMMARY",
+            ],
         )
 
-        new_summary = (
-            summary_match.group(1).strip()
+        fee = extract_ai_field(
+            text,
+            "FEE",
+            [
+                "CONTRACT",
+                "TITLE",
+                "SUMMARY",
+            ],
         )
 
-        if contains_too_much_english(
-            new_title
-            + " "
-            + new_summary
-        ):
+        contract = extract_ai_field(
+            text,
+            "CONTRACT",
+            [
+                "TITLE",
+                "SUMMARY",
+            ],
+        )
+
+        new_title = extract_ai_field(
+            text,
+            "TITLE",
+            ["SUMMARY"],
+        )
+
+        new_summary = extract_ai_field(
+            text,
+            "SUMMARY",
+            [],
+        )
+
+        if not new_title or not new_summary:
             print(
-                "TRANSFER ENGLISH BLOCK:",
-                new_title,
+                "TRANSFER AI PARSE ERROR:",
+                title,
             )
             return None
 
@@ -1273,10 +1523,7 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
             "UNKNOWN",
         }
 
-        if (
-            transfer_type
-            not in valid_types
-        ):
+        if transfer_type not in valid_types:
             transfer_type = "UNKNOWN"
 
         result = {
@@ -1286,29 +1533,54 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
             "news_type": "TRANSFER",
             "transfer_status": status,
             "transfer_type": transfer_type,
-            "player": player,
-            "from_club": from_club,
-            "to_club": to_club,
-            "fee": fee,
-            "contract": contract,
+            "player": player or "UNKNOWN",
+            "from_club": from_club or "UNKNOWN",
+            "to_club": to_club or "UNKNOWN",
+            "fee": fee or "UNKNOWN",
+            "contract": contract or "UNKNOWN",
         }
 
-        combined = (
-            result["title_original"]
-            + " "
-            + result["summary_original"]
-            + " "
-            + result["title"]
-            + " "
-            + result["summary"]
+        # فارسی‌سازی مشترک
+        result = await force_persian_news(
+            result
         )
 
-        if contains_non_football(
+        if not result:
+            return None
+
+        combined = (
+            result.get("title", "")
+            + " "
+            + result.get("summary", "")
+        )
+
+        if not is_persian_text(
             combined
         ):
             print(
-                "FINAL NON-FOOTBALL BLOCK:",
-                result["title"],
+                "TRANSFER FINAL LANGUAGE BLOCK:",
+                result.get("title"),
+            )
+            return None
+
+        original_combined = (
+            article.get(
+                "title_original",
+                "",
+            )
+            + " "
+            + article.get(
+                "summary_original",
+                "",
+            )
+        )
+
+        if contains_non_football(
+            original_combined
+        ):
+            print(
+                "TRANSFER FINAL SPORT BLOCK:",
+                result.get("title"),
             )
             return None
 
@@ -1317,104 +1589,6 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
     except Exception as e:
         print(
             "TRANSFER AI ERROR:",
-            e,
-        )
-
-        return None
-
-
-# =========================================================
-# FORCE PERSIAN
-# =========================================================
-
-async def force_persian_transfer(article):
-    if not client:
-        return None
-
-    title = article.get(
-        "title",
-        "",
-    )
-
-    summary = article.get(
-        "summary",
-        "",
-    )
-
-    if not contains_too_much_english(
-        title + " " + summary
-    ):
-        return article
-
-    prompt = f"""
-این خبر مربوط به نقل‌وانتقالات فوتبال است.
-
-آن را به فارسی روان و حرفه‌ای بازنویسی کن.
-
-تیتر:
-{title}
-
-متن:
-{summary}
-
-فقط:
-
-TITLE: تیتر فارسی
-SUMMARY: خلاصه فارسی
-
-هیچ توضیح دیگری نده.
-"""
-
-    try:
-        response = await client.responses.create(
-            model=AI_MODEL,
-            input=prompt,
-        )
-
-        text = response.output_text.strip()
-
-        title_match = re.search(
-            r"TITLE:\s*(.+)",
-            text,
-            re.IGNORECASE,
-        )
-
-        summary_match = re.search(
-            r"SUMMARY:\s*(.*)",
-            text,
-            re.IGNORECASE | re.DOTALL,
-        )
-
-        if (
-            not title_match
-            or not summary_match
-        ):
-            return None
-
-        new_title = (
-            title_match.group(1).strip()
-        )
-
-        new_summary = (
-            summary_match.group(1).strip()
-        )
-
-        if contains_too_much_english(
-            new_title
-            + " "
-            + new_summary
-        ):
-            return None
-
-        return {
-            **article,
-            "title": new_title,
-            "summary": new_summary,
-        }
-
-    except Exception as e:
-        print(
-            "PERSIAN CLEANUP ERROR:",
             e,
         )
 
@@ -1530,13 +1704,6 @@ async def get_transfer_pipeline():
         if not processed:
             continue
 
-        processed = await force_persian_transfer(
-            processed
-        )
-
-        if not processed:
-            continue
-
         event_key = transfer_event_key(
             processed
         )
@@ -1544,30 +1711,6 @@ async def get_transfer_pipeline():
         if event_key in sent_transfer_keys:
             print(
                 "TRANSFER EVENT DUPLICATE:",
-                processed.get("title"),
-            )
-            continue
-
-        combined = (
-            processed.get("title", "")
-            + " "
-            + processed.get("summary", "")
-        )
-
-        if contains_non_football(
-            combined
-        ):
-            print(
-                "TRANSFER FINAL SPORT BLOCK:",
-                processed.get("title"),
-            )
-            continue
-
-        if contains_too_much_english(
-            combined
-        ):
-            print(
-                "TRANSFER FINAL LANGUAGE BLOCK:",
                 processed.get("title"),
             )
             continue
@@ -1906,19 +2049,61 @@ async def publish_news(
             )
             continue
 
-        # فیلتر نهایی نقل‌وانتقالات
+        # ---------------------------------------------
+        # FINAL LANGUAGE BLOCK
+        # ---------------------------------------------
+
+        final_title = article.get(
+            "title",
+            "",
+        )
+
+        final_summary = article.get(
+            "summary",
+            "",
+        )
+
+        if not is_persian_text(
+            f"{final_title} {final_summary}"
+        ):
+            print(
+                "PUBLISH LANGUAGE BLOCK:",
+                final_title,
+            )
+            continue
+
+        # ---------------------------------------------
+        # FINAL SPORT BLOCK
+        # ---------------------------------------------
+
+        original_text = (
+            article.get(
+                "title_original",
+                "",
+            )
+            + " "
+            + article.get(
+                "summary_original",
+                "",
+            )
+        )
+
+        if contains_non_football(
+            original_text
+        ):
+            print(
+                "PUBLISH SPORT BLOCK:",
+                final_title,
+            )
+            continue
+
+        # ---------------------------------------------
+        # TRANSFER CHECK
+        # ---------------------------------------------
+
         if article.get(
             "news_type"
         ) == "TRANSFER":
-
-            if not is_football_transfer(
-                article
-            ):
-                print(
-                    "TRANSFER PUBLISH BLOCK:",
-                    title,
-                )
-                continue
 
             event_key = transfer_event_key(
                 article
@@ -1927,9 +2112,13 @@ async def publish_news(
             if event_key in sent_transfer_keys:
                 print(
                     "TRANSFER EVENT BLOCK:",
-                    title,
+                    final_title,
                 )
                 continue
+
+        # ---------------------------------------------
+        # POST
+        # ---------------------------------------------
 
         success = await post_article(
             bot,
@@ -2246,7 +2435,10 @@ async def auto_news_job(
 
     try:
 
-        # اخبار عادی فوتبال
+        # ---------------------------------------------
+        # NORMAL FOOTBALL NEWS
+        # ---------------------------------------------
+
         news = await get_news_pipeline()
 
         if news:
@@ -2262,7 +2454,10 @@ async def auto_news_job(
                 f"NORMAL NEWS POSTED: {count}"
             )
 
-        # نقل‌وانتقالات
+        # ---------------------------------------------
+        # TRANSFER NEWS
+        # ---------------------------------------------
+
         transfers = (
             await get_transfer_pipeline()
         )
@@ -2367,14 +2562,20 @@ async def post_init(
         f"TIMEZONE: {TIMEZONE}"
     )
 
-    # اولین بررسی
+    # ---------------------------------------------
+    # FIRST CHECK
+    # ---------------------------------------------
+
     application.job_queue.run_once(
         auto_news_job,
         when=FIRST_NEWS_DELAY,
         name="first_news_check",
     )
 
-    # هر 10 دقیقه
+    # ---------------------------------------------
+    # EVERY 10 MINUTES
+    # ---------------------------------------------
+
     application.job_queue.run_repeating(
         auto_news_job,
         interval=NEWS_INTERVAL,
@@ -2382,8 +2583,10 @@ async def post_init(
         name="automatic_news",
     )
 
-    # خلاصه روزانه ساعت 21:00
-    # اینجا دیگر tuple نداریم؛ time واقعی است
+    # ---------------------------------------------
+    # DAILY DIGEST 21:00
+    # ---------------------------------------------
+
     application.job_queue.run_daily(
         daily_digest_job,
         time=time(
@@ -2431,9 +2634,6 @@ def main():
 
     load_state()
 
-    # نکته مهم:
-    # Defaults باعث می‌شود زمان‌بندی JobQueue
-    # بر اساس Europe/Budapest باشد.
     defaults = Defaults(
         tzinfo=TIMEZONE
     )
@@ -2446,7 +2646,10 @@ def main():
         .build()
     )
 
-    # Commands
+    # ---------------------------------------------
+    # COMMANDS
+    # ---------------------------------------------
+
     application.add_handler(
         CommandHandler(
             "start",
@@ -2489,7 +2692,10 @@ def main():
         )
     )
 
-    # Keyboard
+    # ---------------------------------------------
+    # KEYBOARD
+    # ---------------------------------------------
+
     application.add_handler(
         MessageHandler(
             filters.TEXT
