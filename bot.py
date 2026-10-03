@@ -7,6 +7,7 @@ import os
 import re
 import urllib.parse
 import urllib.request
+
 from datetime import datetime, time
 from io import BytesIO
 from zoneinfo import ZoneInfo
@@ -52,42 +53,78 @@ LOCAL_TZ = ZoneInfo("Europe/Budapest")
 STATE_FILE = "vexa_state.json"
 
 MAX_ARTICLES = 8
-MAX_RECENT_ARTICLES = 200
+MAX_TRANSFER_ARTICLES = 6
+
+MAX_RECENT_ARTICLES = 250
+MAX_TRANSFER_HISTORY = 300
 
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
-
 HTTP_TIMEOUT = 15
 
 
 # =========================================================
-# RSS FEEDS
+# NORMAL FOOTBALL RSS
 # =========================================================
 
 RSS_FEEDS = [
     {
         "name": "BBC Sport",
         "url": "https://feeds.bbci.co.uk/sport/football/rss.xml",
+        "kind": "football",
     },
     {
         "name": "The Guardian",
         "url": "https://www.theguardian.com/football/rss",
+        "kind": "football",
     },
     {
         "name": "ESPN",
         "url": "https://www.espn.com/espn/rss/soccer/news",
+        "kind": "football",
     },
 ]
 
 
 # =========================================================
-# GLOBALS
+# TRANSFER SOURCES
+# =========================================================
+
+TRANSFER_FEEDS = [
+    {
+        "name": "Sky Sports Transfers",
+        "url": "https://www.skysports.com/rss/12040",
+        "kind": "transfer",
+    },
+    {
+        "name": "The Guardian Transfers",
+        "url": "https://www.theguardian.com/football/transfer-window/rss",
+        "kind": "transfer",
+    },
+    {
+        "name": "The Guardian Rumour Mill",
+        "url": "https://www.theguardian.com/football/series/rumourmill/rss",
+        "kind": "transfer",
+    },
+    {
+        "name": "ESPN Transfers",
+        "url": "https://www.espn.com/espn/rss/soccer/news",
+        "kind": "transfer",
+    },
+]
+
+
+# =========================================================
+# GLOBAL STATE
 # =========================================================
 
 sent_links = set()
 sent_title_keys = set()
 sent_content_keys = set()
 
+transfer_event_keys = set()
+
 recent_articles = []
+recent_transfers = []
 
 users = {}
 
@@ -170,9 +207,9 @@ def normalize_title(title):
         r"\s+",
         " ",
         title,
-    ).strip()
+    )
 
-    return title
+    return title.strip()
 
 
 def title_words(title):
@@ -183,17 +220,10 @@ def title_words(title):
     }
 
 
-def title_similarity(
-    title1,
-    title2,
-):
-    a = normalize_title(
-        title1
-    )
+def title_similarity(title1, title2):
 
-    b = normalize_title(
-        title2
-    )
+    a = normalize_title(title1)
+    b = normalize_title(title2)
 
     if not a or not b:
         return 0.0
@@ -228,6 +258,7 @@ def title_similarity(
 
 
 def make_content_key(title):
+
     normalized = normalize_title(
         title
     )
@@ -245,6 +276,7 @@ def make_content_key(title):
 # =========================================================
 
 def canonicalize_url(url):
+
     if not url:
         return ""
 
@@ -282,10 +314,8 @@ def canonicalize_url(url):
             not in ignored
         ]
 
-        new_query = (
-            urllib.parse.urlencode(
-                filtered
-            )
+        new_query = urllib.parse.urlencode(
+            filtered
         )
 
         return urllib.parse.urlunsplit(
@@ -312,6 +342,7 @@ def load_state():
     global sent_links
     global sent_title_keys
     global sent_content_keys
+    global transfer_event_keys
     global users
     global last_digest_date
 
@@ -356,6 +387,13 @@ def load_state():
             )
         )
 
+        transfer_event_keys = set(
+            data.get(
+                "transfer_event_keys",
+                [],
+            )
+        )
+
         users = data.get(
             "users",
             {},
@@ -369,9 +407,11 @@ def load_state():
         print(
             "STATE LOADED:",
             len(sent_links),
-            "links",
+            "links |",
             len(sent_title_keys),
-            "titles",
+            "titles |",
+            len(transfer_event_keys),
+            "transfer events",
         )
 
     except Exception as e:
@@ -389,13 +429,21 @@ def save_state():
         "sent_links": list(
             sent_links
         )[-5000:],
+
         "sent_title_keys": list(
             sent_title_keys
         )[-5000:],
+
         "sent_content_keys": list(
             sent_content_keys
         )[-5000:],
+
+        "transfer_event_keys": list(
+            transfer_event_keys
+        )[-3000:],
+
         "users": users,
+
         "last_digest_date": (
             last_digest_date
         ),
@@ -426,7 +474,7 @@ def save_state():
 
 
 # =========================================================
-# DUPLICATE SYSTEM
+# NORMAL DUPLICATE SYSTEM
 # =========================================================
 
 def is_duplicate_article(
@@ -480,8 +528,7 @@ def is_duplicate_article(
             if (
                 canonical_link
                 and old_link
-                and canonical_link
-                == old_link
+                and canonical_link == old_link
             ):
                 return True
 
@@ -555,6 +602,210 @@ def mark_article_sent(article):
 
 
 # =========================================================
+# TRANSFER EVENT KEY
+# =========================================================
+
+def normalize_entity(value):
+
+    if not value:
+        return ""
+
+    value = safe_text(
+        value
+    ).lower()
+
+    value = re.sub(
+        r"[^\w\s]",
+        " ",
+        value,
+        flags=re.UNICODE,
+    )
+
+    value = re.sub(
+        r"\s+",
+        " ",
+        value,
+    )
+
+    return value.strip()
+
+
+def make_transfer_event_key(
+    article
+):
+
+    player = normalize_entity(
+        article.get(
+            "player",
+            "",
+        )
+    )
+
+    from_club = normalize_entity(
+        article.get(
+            "from_club",
+            "",
+        )
+    )
+
+    to_club = normalize_entity(
+        article.get(
+            "to_club",
+            "",
+        )
+    )
+
+    transfer_type = normalize_entity(
+        article.get(
+            "transfer_type",
+            "",
+        )
+    )
+
+    status = normalize_entity(
+        article.get(
+            "transfer_status",
+            "",
+        )
+    )
+
+    if not player:
+        return ""
+
+    raw = "|".join(
+        [
+            player,
+            from_club,
+            to_club,
+            transfer_type,
+            status,
+        ]
+    )
+
+    return hashlib.sha256(
+        raw.encode("utf-8")
+    ).hexdigest()
+
+
+def is_duplicate_transfer(
+    article,
+    existing_articles=None,
+):
+
+    event_key = make_transfer_event_key(
+        article
+    )
+
+    if (
+        event_key
+        and event_key in transfer_event_keys
+    ):
+
+        return True
+
+    if existing_articles is not None:
+
+        player = normalize_entity(
+            article.get(
+                "player",
+                "",
+            )
+        )
+
+        to_club = normalize_entity(
+            article.get(
+                "to_club",
+                "",
+            )
+        )
+
+        status = normalize_entity(
+            article.get(
+                "transfer_status",
+                "",
+            )
+        )
+
+        if player:
+
+            for old in existing_articles:
+
+                old_player = normalize_entity(
+                    old.get(
+                        "player",
+                        "",
+                    )
+                )
+
+                old_to_club = normalize_entity(
+                    old.get(
+                        "to_club",
+                        "",
+                    )
+                )
+
+                old_status = normalize_entity(
+                    old.get(
+                        "transfer_status",
+                        "",
+                    )
+                )
+
+                if (
+                    player == old_player
+                    and
+                    to_club == old_to_club
+                    and
+                    status == old_status
+                ):
+
+                    if (
+                        title_similarity(
+                            article.get(
+                                "title",
+                                ""
+                            )
+                            or
+                            article.get(
+                                "title_original",
+                                ""
+                            ),
+                            old.get(
+                                "title",
+                                ""
+                            )
+                            or
+                            old.get(
+                                "title_original",
+                                ""
+                            ),
+                        )
+                        >= 0.78
+                    ):
+
+                        return True
+
+    return False
+
+
+def mark_transfer_sent(
+    article
+):
+
+    event_key = make_transfer_event_key(
+        article
+    )
+
+    if event_key:
+
+        transfer_event_keys.add(
+            event_key
+        )
+
+    save_state()
+
+
+# =========================================================
 # HTTP
 # =========================================================
 
@@ -596,7 +847,6 @@ def extract_image_from_entry(
 
     try:
 
-        # media_content
         media_content = entry.get(
             "media_content",
             [],
@@ -641,7 +891,6 @@ def extract_image_from_entry(
 
             return candidates[0][1]
 
-        # media_thumbnail
         thumbnails = entry.get(
             "media_thumbnail",
             [],
@@ -686,7 +935,6 @@ def extract_image_from_entry(
 
             return candidates[0][1]
 
-        # enclosures
         for enclosure in entry.get(
             "enclosures",
             [],
@@ -717,52 +965,13 @@ def extract_image_from_entry(
 
             if (
                 url
-                and (
+                and
+                (
                     not media_type
                     or
                     media_type.startswith(
                         "image/"
                     )
-                )
-            ):
-
-                return url
-
-        # links
-        for item in entry.get(
-            "links",
-            [],
-        ):
-
-            url = safe_text(
-                item.get(
-                    "href",
-                    "",
-                )
-            )
-
-            media_type = safe_text(
-                item.get(
-                    "type",
-                    "",
-                )
-            ).lower()
-
-            rel = safe_text(
-                item.get(
-                    "rel",
-                    "",
-                )
-            )
-
-            if (
-                url
-                and (
-                    media_type.startswith(
-                        "image/"
-                    )
-                    or
-                    rel == "enclosure"
                 )
             ):
 
@@ -780,7 +989,7 @@ def extract_image_from_entry(
 
 
 # =========================================================
-# IMAGE URL HELPERS
+# HTML IMAGE EXTRACTION
 # =========================================================
 
 def normalize_image_url(
@@ -838,10 +1047,6 @@ def normalize_image_url(
     return image_url
 
 
-# =========================================================
-# HTML IMAGE EXTRACTION
-# =========================================================
-
 def extract_meta_image(
     html_text,
     page_url,
@@ -850,11 +1055,8 @@ def extract_meta_image(
     if not html_text:
         return None
 
-    candidates = []
-
     patterns = [
 
-        # Open Graph
         r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']',
 
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
@@ -863,7 +1065,6 @@ def extract_meta_image(
 
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image:secure_url["\']',
 
-        # Twitter
         r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)["\']',
 
         r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
@@ -890,52 +1091,7 @@ def extract_meta_image(
 
             if value:
 
-                candidates.append(
-                    value
-                )
-
-    # image_src
-    link_patterns = [
-
-        r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\']([^"\']+)["\']',
-
-        r'<link[^>]+href=["\']([^"\']+)["\'][^>]+rel=["\']image_src["\']',
-    ]
-
-    for pattern in link_patterns:
-
-        matches = re.findall(
-            pattern,
-            html_text,
-            flags=re.IGNORECASE,
-        )
-
-        for value in matches:
-
-            value = normalize_image_url(
-                value,
-                page_url,
-            )
-
-            if value:
-
-                candidates.append(
-                    value
-                )
-
-    if candidates:
-
-        unique = []
-
-        for item in candidates:
-
-            if item not in unique:
-
-                unique.append(
-                    item
-                )
-
-        return unique[0]
+                return value
 
     return None
 
@@ -981,13 +1137,10 @@ def extract_srcset_images(
                 if match:
 
                     try:
-
                         width = int(
                             match.group(1)
                         )
-
                     except Exception:
-
                         width = 0
 
             url = normalize_image_url(
@@ -1074,10 +1227,6 @@ def extract_html_image_urls(
     return unique
 
 
-# =========================================================
-# HIGH QUALITY IMAGE
-# =========================================================
-
 def get_article_page_image_sync(
     article_url,
     rss_image=None,
@@ -1088,11 +1237,6 @@ def get_article_page_image_sync(
         return rss_image
 
     try:
-
-        print(
-            "IMAGE PAGE CHECK:",
-            article_url,
-        )
 
         request = make_request(
             article_url,
@@ -1108,29 +1252,6 @@ def get_article_page_image_sync(
             timeout=HTTP_TIMEOUT,
         ) as response:
 
-            content_type = safe_text(
-                response.headers.get(
-                    "Content-Type",
-                    "",
-                )
-            ).lower()
-
-            if (
-                content_type
-                and
-                "text/html"
-                not in content_type
-                and
-                "application/xhtml"
-                not in content_type
-            ):
-
-                print(
-                    "IMAGE PAGE: not HTML"
-                )
-
-                return rss_image
-
             raw = response.read(
                 3 * 1024 * 1024
             )
@@ -1142,7 +1263,6 @@ def get_article_page_image_sync(
             errors="ignore",
         )
 
-        # 1. og:image
         og_image = extract_meta_image(
             page,
             page_url,
@@ -1150,14 +1270,8 @@ def get_article_page_image_sync(
 
         if og_image:
 
-            print(
-                "HIGH QUALITY IMAGE:",
-                og_image,
-            )
-
             return og_image
 
-        # 2. srcset
         srcset_images = (
             extract_srcset_images(
                 page,
@@ -1167,14 +1281,8 @@ def get_article_page_image_sync(
 
         if srcset_images:
 
-            print(
-                "SRCSET IMAGE:",
-                srcset_images[0],
-            )
-
             return srcset_images[0]
 
-        # 3. normal HTML image
         html_images = (
             extract_html_image_urls(
                 page,
@@ -1183,11 +1291,6 @@ def get_article_page_image_sync(
         )
 
         if html_images:
-
-            print(
-                "HTML IMAGE:",
-                html_images[0],
-            )
 
             return html_images[0]
 
@@ -1219,18 +1322,13 @@ async def get_best_image_url(
 # =========================================================
 
 def download_image_sync(
-    image_url,
+    image_url
 ):
 
     if not image_url:
         return None
 
     try:
-
-        print(
-            "DOWNLOADING IMAGE:",
-            image_url,
-        )
 
         request = make_request(
             image_url,
@@ -1262,10 +1360,6 @@ def download_image_sync(
 
             if len(data) > MAX_IMAGE_BYTES:
 
-                print(
-                    "IMAGE TOO LARGE"
-                )
-
                 return None
 
             if not data:
@@ -1288,17 +1382,7 @@ def download_image_sync(
                     in data[:5000].lower()
                 ):
 
-                    print(
-                        "DOWNLOADED FILE IS HTML"
-                    )
-
                     return None
-
-            print(
-                "IMAGE DOWNLOADED:",
-                len(data),
-                "bytes",
-            )
 
             return data
 
@@ -1314,7 +1398,7 @@ def download_image_sync(
 
 
 async def download_image(
-    image_url,
+    image_url
 ):
 
     return await asyncio.to_thread(
@@ -1328,15 +1412,10 @@ async def download_image(
 # =========================================================
 
 def parse_feed(
-    feed_info,
+    feed_info
 ):
 
     try:
-
-        print(
-            "RSS: checking",
-            feed_info["name"],
-        )
 
         feed = feedparser.parse(
             feed_info["url"]
@@ -1344,7 +1423,7 @@ def parse_feed(
 
         articles = []
 
-        for entry in feed.entries[:25]:
+        for entry in feed.entries[:30]:
 
             title = safe_text(
                 entry.get(
@@ -1390,23 +1469,27 @@ def parse_feed(
 
             articles.append(
                 {
-                    "source": feed_info["name"],
+                    "source": feed_info[
+                        "name"
+                    ],
+
+                    "source_kind": feed_info[
+                        "kind"
+                    ],
+
                     "title_original": title,
+
                     "link": link,
+
                     "summary_original": summary,
+
                     "published": published,
+
                     "rss_image": rss_image,
+
                     "image_url": None,
                 }
             )
-
-        print(
-            "RSS:",
-            feed_info["name"],
-            "->",
-            len(articles),
-            "items",
-        )
 
         return articles
 
@@ -1422,6 +1505,10 @@ def parse_feed(
         return []
 
 
+# =========================================================
+# COLLECT NORMAL NEWS
+# =========================================================
+
 async def collect_raw_articles():
 
     all_articles = []
@@ -1433,28 +1520,87 @@ async def collect_raw_articles():
             feed_info,
         )
 
-        for article in articles:
-
-            if is_duplicate_article(
-                article.get(
-                    "link",
-                    "",
-                ),
-                article.get(
-                    "title_original",
-                    "",
-                ),
-            ):
-
-                continue
-
-            all_articles.append(
-                article
-            )
+        all_articles.extend(
+            articles
+        )
 
     unique = []
 
     for article in all_articles:
+
+        if is_duplicate_article(
+            article.get(
+                "link",
+                "",
+            ),
+            article.get(
+                "title_original",
+                "",
+            ),
+        ):
+
+            continue
+
+        if is_duplicate_article(
+            article.get(
+                "link",
+                "",
+            ),
+            article.get(
+                "title_original",
+                "",
+            ),
+            existing_articles=unique,
+        ):
+
+            continue
+
+        unique.append(
+            article
+        )
+
+        if len(unique) >= MAX_ARTICLES:
+
+            break
+
+    return unique
+
+
+# =========================================================
+# COLLECT TRANSFER NEWS
+# =========================================================
+
+async def collect_transfer_articles():
+
+    all_articles = []
+
+    for feed_info in TRANSFER_FEEDS:
+
+        articles = await asyncio.to_thread(
+            parse_feed,
+            feed_info,
+        )
+
+        all_articles.extend(
+            articles
+        )
+
+    unique = []
+
+    for article in all_articles:
+
+        if is_duplicate_article(
+            article.get(
+                "link",
+                "",
+            ),
+            article.get(
+                "title_original",
+                "",
+            ),
+        ):
+
+            continue
 
         if is_duplicate_article(
             article.get(
@@ -1476,15 +1622,10 @@ async def collect_raw_articles():
 
         if (
             len(unique)
-            >= MAX_ARTICLES
+            >= MAX_TRANSFER_ARTICLES
         ):
 
             break
-
-    print(
-        "RSS TOTAL NEW:",
-        len(unique),
-    )
 
     return unique
 
@@ -1507,17 +1648,19 @@ def get_openai_client():
 
             return None
 
-        openai_client = (
-            AsyncOpenAI(
-                api_key=OPENAI_API_KEY
-            )
+        openai_client = AsyncOpenAI(
+            api_key=OPENAI_API_KEY
         )
 
     return openai_client
 
 
+# =========================================================
+# NORMAL NEWS AI
+# =========================================================
+
 async def translate_and_classify(
-    articles,
+    articles
 ):
 
     client = get_openai_client()
@@ -1530,62 +1673,42 @@ async def translate_and_classify(
 
     for article in articles:
 
-        original_title = (
-            article.get(
-                "title_original",
-                "",
-            )
+        original_title = article.get(
+            "title_original",
+            "",
         )
 
-        original_summary = (
-            article.get(
-                "summary_original",
-                "",
-            )
+        original_summary = article.get(
+            "summary_original",
+            "",
         )
 
         prompt = f"""
 You are the editor of a Persian football news Telegram channel.
 
-Rewrite the following football news in natural Persian.
+Rewrite this football news in natural Persian.
 
 Rules:
 - Do not invent facts.
-- Keep important facts accurate.
-- Make the headline short and engaging.
-- Make the body suitable for Telegram.
-- Use 2 to 4 short paragraphs.
-- Do not include the source URL.
-- Do not add your own opinion.
+- Keep facts accurate.
+- Do not turn rumors into confirmed facts.
+- Make the headline short.
+- Body should be 2 to 4 short paragraphs.
+- Do not include source URLs.
+- Do not add personal opinions.
 
-IMPORTANT CLASSIFICATION RULE:
+Importance:
 
-Determine the importance level of this football news.
+URGENT = genuinely breaking or major football news.
 
-Use EXACTLY ONE of these levels:
+IMPORTANT = important football news deserving extra attention.
 
-URGENT = only for genuinely breaking or major news, such as:
-- Official signing of a major player
-- Major transfer announcement
-- Major managerial change
-- Major trophy or final result
-- Major injury to a key player
-- Major official club or federation announcement
-- Extremely important breaking football news
+NORMAL = ordinary football news, interviews, routine training,
+minor comments, minor squad updates, or interesting but non-major stories.
 
-IMPORTANT = important football news that deserves extra attention, but is not breaking news.
+Be strict.
 
-NORMAL = ordinary football news, interviews, training updates, routine comments, minor rumors, minor squad news, or stories that are interesting but not major.
-
-BE STRICT.
-
-Most ordinary football news should be NORMAL.
-
-Do NOT mark ordinary news as URGENT or IMPORTANT just because it is interesting.
-
-Do NOT use URGENT for normal transfer rumors.
-
-Do NOT use IMPORTANT for ordinary interviews or routine training news.
+Most normal news must be NORMAL.
 
 Return EXACTLY:
 
@@ -1610,11 +1733,9 @@ ORIGINAL SUMMARY:
 
         try:
 
-            response = (
-                await client.responses.create(
-                    model=AI_MODEL,
-                    input=prompt,
-                )
+            response = await client.responses.create(
+                model=AI_MODEL,
+                input=prompt,
             )
 
             output = safe_text(
@@ -1625,14 +1746,6 @@ ORIGINAL SUMMARY:
                 )
             )
 
-            if not output:
-
-                print(
-                    "AI EMPTY"
-                )
-
-                continue
-
             title_match = re.search(
                 r"TITLE:\s*(.*?)(?:\n|$)",
                 output,
@@ -1642,11 +1755,7 @@ ORIGINAL SUMMARY:
             text_match = re.search(
                 r"TEXT:\s*(.*?)(?:\nLEVEL:|$)",
                 output,
-                flags=(
-                    re.IGNORECASE
-                    |
-                    re.DOTALL
-                ),
+                flags=re.IGNORECASE | re.DOTALL,
             )
 
             level_match = re.search(
@@ -1655,33 +1764,25 @@ ORIGINAL SUMMARY:
                 flags=re.IGNORECASE,
             )
 
-            if title_match:
-
-                translated_title = (
-                    safe_text(
-                        title_match.group(1)
-                    )
+            article["title"] = (
+                safe_text(
+                    title_match.group(1)
                 )
+                if title_match
+                else original_title
+            )
 
-            else:
-
-                translated_title = (
-                    original_title
+            article["text"] = (
+                safe_text(
+                    text_match.group(1)
                 )
-
-            if text_match:
-
-                translated_text = (
-                    safe_text(
-                        text_match.group(1)
-                    )
-                )
-
-            else:
-
-                translated_text = (
+                if text_match
+                else (
                     original_summary
+                    or
+                    "اطلاعات بیشتری درباره این خبر منتشر شده است."
                 )
+            )
 
             level = "NORMAL"
 
@@ -1692,8 +1793,6 @@ ORIGINAL SUMMARY:
                     .upper()
                 )
 
-            # امنیت بیشتر:
-            # هر چیزی غیر از سه مقدار مجاز = NORMAL
             if level not in {
                 "URGENT",
                 "IMPORTANT",
@@ -1702,12 +1801,368 @@ ORIGINAL SUMMARY:
 
                 level = "NORMAL"
 
+            article["level"] = level
+
+            article["important"] = (
+                level
+                in {
+                    "URGENT",
+                    "IMPORTANT",
+                }
+            )
+
+            article["news_type"] = "FOOTBALL"
+
+            results.append(
+                article
+            )
+
+        except Exception as e:
+
+            print(
+                "NORMAL AI ERROR:",
+                type(e).__name__,
+                e,
+            )
+
             article["title"] = (
-                translated_title
+                original_title
             )
 
             article["text"] = (
-                translated_text
+                original_summary
+                or
+                "برای این خبر اطلاعات بیشتری منتشر شده است."
+            )
+
+            article["level"] = "NORMAL"
+            article["important"] = False
+            article["news_type"] = "FOOTBALL"
+
+            results.append(
+                article
+            )
+
+    return results
+
+
+# =========================================================
+# TRANSFER AI
+# =========================================================
+
+async def classify_transfers(
+    articles
+):
+
+    client = get_openai_client()
+
+    if not client:
+
+        return articles
+
+    results = []
+
+    for article in articles:
+
+        original_title = article.get(
+            "title_original",
+            "",
+        )
+
+        original_summary = article.get(
+            "summary_original",
+            "",
+        )
+
+        prompt = f"""
+You are a highly careful football transfer editor.
+
+Analyze this football transfer report.
+
+Your most important rule:
+NEVER upgrade a rumor into an official transfer.
+
+Use the wording and evidence in the source.
+
+TRANSFER STATUS:
+
+OFFICIAL
+Only if the source clearly reports an official announcement,
+completed signing, completed loan, club confirmation,
+player confirmation, or equivalent official confirmation.
+
+AGREEMENT
+Use when a deal/agreement is clearly reported but the transfer
+is not yet officially completed.
+
+NEGOTIATION
+Use when clubs are negotiating, discussing, making an offer,
+holding talks, or pursuing a player.
+
+RUMOR
+Use when it is only reported as a possibility, interest,
+speculation, paper talk, or rumor.
+
+DENIED
+Use when the relevant club, player, agent, or reliable source
+clearly denies the transfer claim.
+
+TRANSFER TYPE:
+
+PERMANENT
+LOAN
+FREE
+EXTENSION
+RETURN
+UNKNOWN
+
+Extract these if the source provides them:
+
+PLAYER
+FROM_CLUB
+TO_CLUB
+FEE
+CONTRACT
+TRANSFER_TYPE
+TRANSFER_STATUS
+
+Important:
+- Do not invent a player name.
+- Do not invent clubs.
+- Do not invent a fee.
+- Do not invent contract length.
+- If something is unknown, write UNKNOWN.
+- Preserve uncertainty.
+- A newspaper rumor remains RUMOR.
+- "Interested in" is NOT an agreement.
+- "Bid submitted" is NOT an official transfer.
+- "Agreement reached" is AGREEMENT, not OFFICIAL.
+- "Here we go" or similar wording alone is not official unless
+the source itself clearly establishes the transfer as completed.
+- If the source says a club is monitoring a player, classify as RUMOR.
+- If the source says talks are ongoing, classify as NEGOTIATION.
+
+IMPORTANCE:
+
+URGENT
+Only a major breaking transfer development.
+
+IMPORTANT
+Major transfer development worth highlighting.
+
+NORMAL
+Routine transfer rumor or minor transfer development.
+
+Write natural Persian suitable for Telegram.
+
+Do not include the source URL.
+
+Return EXACTLY:
+
+TITLE:
+<short Persian Persian headline>
+
+TEXT:
+<2 to 4 short Persian paragraphs>
+
+PLAYER:
+<name or UNKNOWN>
+
+FROM_CLUB:
+<club or UNKNOWN>
+
+TO_CLUB:
+<club or UNKNOWN>
+
+FEE:
+<fee or UNKNOWN>
+
+CONTRACT:
+<contract or UNKNOWN>
+
+TRANSFER_TYPE:
+<PERMANENT or LOAN or FREE or EXTENSION or RETURN or UNKNOWN>
+
+TRANSFER_STATUS:
+<OFFICIAL or AGREEMENT or NEGOTIATION or RUMOR or DENIED>
+
+LEVEL:
+<URGENT or IMPORTANT or NORMAL>
+
+SOURCE:
+{article.get("source", "")}
+
+ORIGINAL TITLE:
+{original_title}
+
+ORIGINAL SUMMARY:
+{original_summary}
+"""
+
+        try:
+
+            response = await client.responses.create(
+                model=AI_MODEL,
+                input=prompt,
+            )
+
+            output = safe_text(
+                getattr(
+                    response,
+                    "output_text",
+                    "",
+                )
+            )
+
+            def extract(
+                label,
+                default="UNKNOWN",
+            ):
+
+                match = re.search(
+                    rf"{label}:\s*(.*?)(?:\n|$)",
+                    output,
+                    flags=re.IGNORECASE,
+                )
+
+                if not match:
+                    return default
+
+                value = safe_text(
+                    match.group(1)
+                )
+
+                return (
+                    value
+                    if value
+                    else default
+                )
+
+            title = extract(
+                "TITLE",
+                original_title,
+            )
+
+            text_match = re.search(
+                r"TEXT:\s*(.*?)(?:\nPLAYER:|$)",
+                output,
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+
+            text = (
+                safe_text(
+                    text_match.group(1)
+                )
+                if text_match
+                else
+                original_summary
+            )
+
+            player = extract(
+                "PLAYER"
+            )
+
+            from_club = extract(
+                "FROM_CLUB"
+            )
+
+            to_club = extract(
+                "TO_CLUB"
+            )
+
+            fee = extract(
+                "FEE"
+            )
+
+            contract = extract(
+                "CONTRACT"
+            )
+
+            transfer_type = extract(
+                "TRANSFER_TYPE"
+            ).upper()
+
+            transfer_status = extract(
+                "TRANSFER_STATUS"
+            ).upper()
+
+            level = extract(
+                "LEVEL",
+                "NORMAL",
+            ).upper()
+
+            allowed_types = {
+                "PERMANENT",
+                "LOAN",
+                "FREE",
+                "EXTENSION",
+                "RETURN",
+                "UNKNOWN",
+            }
+
+            allowed_statuses = {
+                "OFFICIAL",
+                "AGREEMENT",
+                "NEGOTIATION",
+                "RUMOR",
+                "DENIED",
+            }
+
+            allowed_levels = {
+                "URGENT",
+                "IMPORTANT",
+                "NORMAL",
+            }
+
+            if transfer_type not in allowed_types:
+
+                transfer_type = "UNKNOWN"
+
+            if transfer_status not in allowed_statuses:
+
+                transfer_status = "RUMOR"
+
+            if level not in allowed_levels:
+
+                level = "NORMAL"
+
+            # -------------------------------------------------
+            # SAFETY DOWNGRADE
+            # -------------------------------------------------
+            #
+            # اگر اطلاعات اصلی ناقص باشد، اجازه نمی‌دهیم
+            # خبر به‌اشتباه "رسمی" منتشر شود.
+            #
+
+            if (
+                player == "UNKNOWN"
+                and
+                transfer_status == "OFFICIAL"
+            ):
+
+                transfer_status = "RUMOR"
+                level = "NORMAL"
+
+            article["title"] = title
+
+            article["text"] = text
+
+            article["player"] = player
+
+            article["from_club"] = from_club
+
+            article["to_club"] = to_club
+
+            article["fee"] = fee
+
+            article["contract"] = contract
+
+            article["transfer_type"] = (
+                transfer_type
+            )
+
+            article["transfer_status"] = (
+                transfer_status
             )
 
             article["level"] = level
@@ -1720,21 +2175,27 @@ ORIGINAL SUMMARY:
                 }
             )
 
+            article["news_type"] = (
+                "TRANSFER"
+            )
+
             results.append(
                 article
             )
 
             print(
-                "AI:",
-                translated_title,
-                "| LEVEL:",
+                "TRANSFER AI:",
+                title,
+                "|",
+                transfer_status,
+                "|",
                 level,
             )
 
         except Exception as e:
 
             print(
-                "AI ERROR:",
+                "TRANSFER AI ERROR:",
                 type(e).__name__,
                 e,
             )
@@ -1746,14 +2207,23 @@ ORIGINAL SUMMARY:
             article["text"] = (
                 original_summary
                 or
-                "برای این خبر اطلاعات بیشتری در منبع اصلی منتشر شده است."
+                "گزارش نقل‌وانتقالاتی جدیدی منتشر شده است."
             )
 
-            article["level"] = (
-                "NORMAL"
+            article["player"] = "UNKNOWN"
+            article["from_club"] = "UNKNOWN"
+            article["to_club"] = "UNKNOWN"
+            article["fee"] = "UNKNOWN"
+            article["contract"] = "UNKNOWN"
+            article["transfer_type"] = "UNKNOWN"
+
+            article["transfer_status"] = (
+                "RUMOR"
             )
 
+            article["level"] = "NORMAL"
             article["important"] = False
+            article["news_type"] = "TRANSFER"
 
             results.append(
                 article
@@ -1763,16 +2233,12 @@ ORIGINAL SUMMARY:
 
 
 # =========================================================
-# PREPARE IMAGES
+# IMAGE PREPARATION
 # =========================================================
 
 async def prepare_article_images(
-    articles,
+    articles
 ):
-
-    print(
-        "IMAGE SYSTEM: finding original images..."
-    )
 
     for article in articles:
 
@@ -1790,110 +2256,201 @@ async def prepare_article_images(
             )
         )
 
-        best_image = (
-            await get_best_image_url(
-                article_url,
-                rss_image,
-            )
+        best_image = await get_best_image_url(
+            article_url,
+            rss_image,
         )
 
         article["image_url"] = (
             best_image
         )
 
-        if best_image:
-
-            print(
-                "FINAL IMAGE:",
-                best_image,
-            )
-
-        else:
-
-            print(
-                "NO IMAGE FOUND:",
-                article_url,
-            )
-
     return articles
 
 
 # =========================================================
-# NEWS PIPELINE
+# NORMAL NEWS PIPELINE
 # =========================================================
 
-async def get_news_pipeline(
-    max_articles=MAX_ARTICLES,
-):
+async def get_news_pipeline():
 
     articles = await collect_raw_articles()
 
     if not articles:
-
         return []
 
-    articles = articles[
-        :max_articles
-    ]
-
-    translated = (
-        await translate_and_classify(
-            articles
-        )
+    articles = await translate_and_classify(
+        articles
     )
 
-    translated = (
-        await prepare_article_images(
-            translated
-        )
+    articles = await prepare_article_images(
+        articles
     )
 
     global recent_articles
 
     recent_articles = (
-        translated
+        articles
         + recent_articles
+    )[:MAX_RECENT_ARTICLES]
+
+    return articles
+
+
+# =========================================================
+# TRANSFER PIPELINE
+# =========================================================
+
+async def get_transfer_pipeline():
+
+    articles = await collect_transfer_articles()
+
+    if not articles:
+        return []
+
+    articles = await classify_transfers(
+        articles
     )
 
-    unique = {}
+    # -----------------------------------------------------
+    # TRANSFER DUPLICATE CHECK
+    # -----------------------------------------------------
 
-    for article in recent_articles:
+    filtered = []
 
-        key = canonicalize_url(
-            article.get(
-                "link",
-                "",
-            )
-        )
+    for article in articles:
 
-        if not key:
+        if is_duplicate_transfer(
+            article,
+            existing_articles=filtered,
+        ):
 
-            key = normalize_title(
+            print(
+                "TRANSFER DUPLICATE BLOCKED:",
                 article.get(
                     "title",
                     "",
-                )
+                ),
             )
 
-        if key:
+            continue
 
-            unique[key] = article
+        filtered.append(
+            article
+        )
 
-    recent_articles = list(
-        unique.values()
-    )[
-        :MAX_RECENT_ARTICLES
-    ]
+    articles = await prepare_article_images(
+        filtered
+    )
 
-    return translated
+    global recent_transfers
+
+    recent_transfers = (
+        articles
+        + recent_transfers
+    )[:MAX_TRANSFER_HISTORY]
+
+    return articles
 
 
 # =========================================================
-# BUILD POST TEXT
+# FULL PIPELINE
+# =========================================================
+
+async def get_full_news_pipeline():
+
+    normal_news = await get_news_pipeline()
+
+    transfer_news = await get_transfer_pipeline()
+
+    combined = []
+
+    combined.extend(
+        transfer_news
+    )
+
+    combined.extend(
+        normal_news
+    )
+
+    return combined
+
+
+# =========================================================
+# STATUS DISPLAY
+# =========================================================
+
+def transfer_status_label(
+    status
+):
+
+    status = safe_text(
+        status
+    ).upper()
+
+    labels = {
+
+        "OFFICIAL":
+            "✅ انتقال رسمی",
+
+        "AGREEMENT":
+            "📝 توافق",
+
+        "NEGOTIATION":
+            "🤝 مذاکرات",
+
+        "RUMOR":
+            "🟡 شایعه",
+
+        "DENIED":
+            "❌ تکذیب",
+    }
+
+    return labels.get(
+        status,
+        "🟡 نقل‌وانتقالات",
+    )
+
+
+def transfer_type_label(
+    transfer_type
+):
+
+    transfer_type = safe_text(
+        transfer_type
+    ).upper()
+
+    labels = {
+
+        "PERMANENT":
+            "انتقال دائمی",
+
+        "LOAN":
+            "قرضی",
+
+        "FREE":
+            "آزاد",
+
+        "EXTENSION":
+            "تمدید قرارداد",
+
+        "RETURN":
+            "بازگشت",
+
+    }
+
+    return labels.get(
+        transfer_type,
+        "",
+    )
+
+
+# =========================================================
+# BUILD POST
 # =========================================================
 
 def build_post_text(
-    article,
+    article
 ):
 
     title = safe_text(
@@ -1917,10 +2474,133 @@ def build_post_text(
         )
     )
 
+    news_type = safe_text(
+        article.get(
+            "news_type",
+            "FOOTBALL",
+        )
+    )
+
     level = article.get(
         "level",
         "NORMAL",
     )
+
+    if news_type == "TRANSFER":
+
+        status = article.get(
+            "transfer_status",
+            "RUMOR",
+        )
+
+        prefix = transfer_status_label(
+            status
+        )
+
+        lines = [
+            prefix,
+            "",
+            f"🔥 {title}",
+            "",
+            text,
+        ]
+
+        player = safe_text(
+            article.get(
+                "player",
+                "",
+            )
+        )
+
+        from_club = safe_text(
+            article.get(
+                "from_club",
+                "",
+            )
+        )
+
+        to_club = safe_text(
+            article.get(
+                "to_club",
+                "",
+            )
+        )
+
+        fee = safe_text(
+            article.get(
+                "fee",
+                "",
+            )
+        )
+
+        transfer_type = (
+            transfer_type_label(
+                article.get(
+                    "transfer_type",
+                    "",
+                )
+            )
+        )
+
+        if (
+            player
+            and player != "UNKNOWN"
+        ):
+
+            lines.extend(
+                [
+                    "",
+                    f"👤 بازیکن: {player}",
+                ]
+            )
+
+        if (
+            from_club
+            and from_club != "UNKNOWN"
+        ):
+
+            lines.append(
+                f"🏠 مبدأ: {from_club}"
+            )
+
+        if (
+            to_club
+            and to_club != "UNKNOWN"
+        ):
+
+            lines.append(
+                f"🏟 مقصد: {to_club}"
+            )
+
+        if (
+            fee
+            and fee != "UNKNOWN"
+        ):
+
+            lines.append(
+                f"💰 مبلغ: {fee}"
+            )
+
+        if transfer_type:
+
+            lines.append(
+                f"🔄 نوع: {transfer_type}"
+            )
+
+        lines.extend(
+            [
+                "",
+                f"📰 منبع: {source}",
+            ]
+        )
+
+        return "\n".join(
+            lines
+        )
+
+    # -----------------------------------------------------
+    # NORMAL NEWS
+    # -----------------------------------------------------
 
     if level == "URGENT":
 
@@ -1967,15 +2647,8 @@ async def post_article(
 
         if image_url:
 
-            print(
-                "POST IMAGE:",
-                image_url,
-            )
-
-            image_data = (
-                await download_image(
-                    image_url
-                )
+            image_data = await download_image(
+                image_url
             )
 
             if image_data:
@@ -1986,23 +2659,15 @@ async def post_article(
                         BytesIO(
                             image_data
                         ),
-                        filename=(
-                            "vexa_news.jpg"
-                        ),
+                        filename="vexa.jpg",
                     )
 
-                    caption = text[
-                        :1024
-                    ]
+                    caption = text[:1024]
 
                     await bot.send_photo(
                         chat_id=target,
                         photo=photo,
                         caption=caption,
-                    )
-
-                    print(
-                        "PHOTO POST SUCCESS"
                     )
 
                     if len(text) > 1024:
@@ -2023,20 +2688,10 @@ async def post_article(
                         e,
                     )
 
-            else:
-
-                print(
-                    "IMAGE FAILED -> TEXT FALLBACK"
-                )
-
         await bot.send_message(
             chat_id=target,
             text=text,
             disable_web_page_preview=True,
-        )
-
-        print(
-            "TEXT POST SUCCESS"
         )
 
         return True
@@ -2053,7 +2708,7 @@ async def post_article(
 
 
 # =========================================================
-# PUBLISH
+# PUBLISH NEWS
 # =========================================================
 
 async def publish_news(
@@ -2063,12 +2718,6 @@ async def publish_news(
 ):
 
     posted = 0
-
-    print(
-        "PUBLISH:",
-        len(articles),
-        "articles ready.",
-    )
 
     for article in articles:
 
@@ -2107,14 +2756,12 @@ async def publish_news(
             or
             (
                 title_key
-                and title_key
-                in sent_title_keys
+                and title_key in sent_title_keys
             )
             or
             (
                 content_key
-                and content_key
-                in sent_content_keys
+                and content_key in sent_content_keys
             )
         ):
 
@@ -2124,11 +2771,6 @@ async def publish_news(
             )
 
             continue
-
-        print(
-            "TRYING TO POST:",
-            title,
-        )
 
         success = await post_article(
             bot,
@@ -2142,29 +2784,22 @@ async def publish_news(
                 article
             )
 
+            if (
+                article.get(
+                    "news_type"
+                )
+                == "TRANSFER"
+            ):
+
+                mark_transfer_sent(
+                    article
+                )
+
             posted += 1
-
-            print(
-                "CHANNEL POST SUCCESS:",
-                title,
-            )
-
-        else:
-
-            print(
-                "CHANNEL POST FAILED:",
-                title,
-            )
 
         await asyncio.sleep(
             1.2
         )
-
-    print(
-        "PUBLISH FINISHED:",
-        posted,
-        "posted.",
-    )
 
     return posted
 
@@ -2178,10 +2813,10 @@ def main_keyboard():
     keyboard = [
         [
             "📰 اخبار جدید",
-            "🚨 اخبار مهم",
+            "🔥 نقل‌وانتقالات",
         ],
         [
-            "⚽ فوتبال",
+            "🚨 اخبار مهم",
             "🔄 بروزرسانی",
         ],
         [
@@ -2219,8 +2854,9 @@ async def start_command(
 
     await update.message.reply_text(
         "سلام داداش 👋🔥\n\n"
-        "من Vexa هستم؛ ربات اخبار فوتبال.\n"
-        "از منوی پایین می‌تونی اخبار جدید رو بگیری.",
+        "من Vexa هستم؛ ربات اخبار فوتبال و نقل‌وانتقالات.\n\n"
+        "از منوی پایین می‌تونی اخبار جدید، "
+        "اخبار مهم و نقل‌وانتقالات رو ببینی.",
         reply_markup=main_keyboard(),
     )
 
@@ -2239,7 +2875,8 @@ async def help_command(
         "/start — شروع ربات\n"
         "/news — اخبار جدید\n"
         "/important — اخبار مهم\n"
-        "/testpost — تست کانال\n"
+        "/transfers — نقل‌وانتقالات\n"
+        "/testpost — تست ارسال\n"
         "/help — راهنما",
         reply_markup=main_keyboard(),
     )
@@ -2275,11 +2912,7 @@ async def news_command(
 
     try:
 
-        articles = (
-            await get_news_pipeline(
-                max_articles=5
-            )
-        )
+        articles = await get_news_pipeline()
 
         if not articles:
 
@@ -2317,6 +2950,58 @@ async def news_command(
 
 
 # =========================================================
+# TRANSFERS COMMAND
+# =========================================================
+
+async def transfers_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    await update.message.reply_text(
+        "🔄 دارم بازار نقل‌وانتقالات رو بررسی می‌کنم..."
+    )
+
+    try:
+
+        articles = await get_transfer_pipeline()
+
+        if not articles:
+
+            await update.message.reply_text(
+                "فعلاً خبر نقل‌وانتقالاتی جدیدی پیدا نکردم 😅",
+                reply_markup=main_keyboard(),
+            )
+
+            return
+
+        for article in articles:
+
+            await post_article(
+                context.bot,
+                article,
+                update.effective_chat.id,
+            )
+
+            await asyncio.sleep(
+                0.8
+            )
+
+    except Exception as e:
+
+        print(
+            "TRANSFERS ERROR:",
+            type(e).__name__,
+            e,
+        )
+
+        await update.message.reply_text(
+            "یه خطا موقع بررسی نقل‌وانتقالات پیش اومد 😕",
+            reply_markup=main_keyboard(),
+        )
+
+
+# =========================================================
 # IMPORTANT COMMAND
 # =========================================================
 
@@ -2331,11 +3016,7 @@ async def important_command(
 
     try:
 
-        articles = (
-            await get_news_pipeline(
-                max_articles=MAX_ARTICLES
-            )
-        )
+        articles = await get_full_news_pipeline()
 
         important_articles = [
             article
@@ -2359,9 +3040,7 @@ async def important_command(
 
             return
 
-        for article in (
-            important_articles
-        ):
+        for article in important_articles:
 
             await post_article(
                 context.bot,
@@ -2400,11 +3079,12 @@ async def testpost_command(
         "title": "تست Vexa",
         "text": (
             "این یک پیام آزمایشی برای بررسی "
-            "ارسال ربات به کانال است."
+            "سیستم جدید Vexa است."
         ),
         "source": "Vexa",
         "level": "NORMAL",
         "important": False,
+        "news_type": "FOOTBALL",
         "image_url": "",
     }
 
@@ -2464,16 +3144,16 @@ async def button_handler(
             context,
         )
 
-    elif text == "🚨 اخبار مهم":
+    elif text == "🔥 نقل‌وانتقالات":
 
-        await important_command(
+        await transfers_command(
             update,
             context,
         )
 
-    elif text == "⚽ فوتبال":
+    elif text == "🚨 اخبار مهم":
 
-        await news_command(
+        await important_command(
             update,
             context,
         )
@@ -2513,63 +3193,61 @@ async def automatic_news_job(
     )
 
     print(
-        "AUTO NEWS JOB STARTED"
-    )
-
-    print(
-        "TIME:",
-        now_local().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        ),
-    )
-
-    print(
-        "CHANNEL:",
-        CHANNEL_USERNAME,
+        "VEXA AUTO JOB STARTED"
     )
 
     try:
 
-        articles = (
-            await get_news_pipeline(
-                max_articles=MAX_ARTICLES
-            )
+        # ---------------------------------------------
+        # TRANSFERS FIRST
+        # ---------------------------------------------
+
+        transfer_articles = (
+            await get_transfer_pipeline()
         )
 
-        if not articles:
+        if transfer_articles:
 
             print(
-                "AUTO NEWS: NO NEW ARTICLES"
+                "TRANSFER ARTICLES:",
+                len(transfer_articles),
             )
+
+            await publish_news(
+                transfer_articles,
+                context.bot,
+                CHANNEL_USERNAME,
+            )
+
+        # ---------------------------------------------
+        # NORMAL FOOTBALL NEWS
+        # ---------------------------------------------
+
+        normal_articles = (
+            await get_news_pipeline()
+        )
+
+        if normal_articles:
 
             print(
-                "====================================\n"
+                "NORMAL ARTICLES:",
+                len(normal_articles),
             )
 
-            return
+            await publish_news(
+                normal_articles,
+                context.bot,
+                CHANNEL_USERNAME,
+            )
 
         print(
-            "AUTO NEWS:",
-            len(articles),
-            "new articles",
-        )
-
-        posted = await publish_news(
-            articles,
-            context.bot,
-            CHANNEL_USERNAME,
-        )
-
-        print(
-            "AUTO NEWS FINISHED:",
-            posted,
-            "posted",
+            "VEXA AUTO JOB FINISHED"
         )
 
     except Exception as e:
 
         print(
-            "AUTO NEWS ERROR:",
+            "AUTO JOB ERROR:",
             type(e).__name__,
             e,
         )
@@ -2595,66 +3273,62 @@ async def daily_digest_job(
         .isoformat()
     )
 
-    if (
-        last_digest_date
-        == today
-    ):
-
-        print(
-            "DIGEST: already sent."
-        )
+    if last_digest_date == today:
 
         return
 
-    print(
-        "DAILY DIGEST STARTED"
-    )
-
     try:
 
-        articles = (
-            await get_news_pipeline(
-                max_articles=MAX_ARTICLES
-            )
-        )
+        articles = await get_full_news_pipeline()
 
         if not articles:
 
-            print(
-                "DIGEST: no articles."
-            )
-
             return
 
-        urgent = [
-            article
-            for article in articles
-            if article.get(
-                "level",
-                "NORMAL",
-            )
-            == "URGENT"
-        ]
+        selected = []
 
-        important = [
-            article
-            for article in articles
-            if article.get(
-                "level",
-                "NORMAL",
-            )
-            == "IMPORTANT"
-        ]
+        # اول خبرهای فوری
+        for article in articles:
 
-        selected = (
-            urgent[:3]
-            +
-            important[:3]
-        )
+            if (
+                article.get(
+                    "level",
+                    "NORMAL",
+                )
+                == "URGENT"
+            ):
 
+                selected.append(
+                    article
+                )
+
+        # بعد خبرهای مهم
+        for article in articles:
+
+            if len(selected) >= 6:
+
+                break
+
+            if (
+                article.get(
+                    "level",
+                    "NORMAL",
+                )
+                == "IMPORTANT"
+            ):
+
+                if article not in selected:
+
+                    selected.append(
+                        article
+                    )
+
+        # اگر خبر مهم کافی نبود
         if not selected:
 
             selected = articles[:5]
+
+        selected = selected[:6]
 
         lines = [
             "🌙 خلاصه اخبار فوتبال امروز",
@@ -2666,51 +3340,60 @@ async def daily_digest_job(
             start=1,
         ):
 
-            title = safe_text(
-                article.get(
-                    "title",
-                    "",
+            news_type = article.get(
+                "news_type",
+                "FOOTBALL",
+            )
+
+            if news_type == "TRANSFER":
+
+                icon = "🔄"
+
+                status = (
+                    transfer_status_label(
+                        article.get(
+                            "transfer_status",
+                            "RUMOR",
+                        )
+                    )
                 )
-            )
 
-            level = article.get(
-                "level",
-                "NORMAL",
-            )
-
-            if level == "URGENT":
-
-                icon = "🚨"
-
-            elif level == "IMPORTANT":
-
-                icon = "🔥"
+                lines.append(
+                    f"{icon} {status}: "
+                    f"{article.get('title', '')}"
+                )
 
             else:
 
-                icon = "⚽"
+                level = article.get(
+                    "level",
+                    "NORMAL",
+                )
 
-            lines.append(
-                f"{icon} {index}. {title}"
-            )
+                icon = (
+                    "🚨"
+                    if level == "URGENT"
+                    else
+                    "🔥"
+                    if level == "IMPORTANT"
+                    else
+                    "⚽"
+                )
 
-        digest_text = (
-            "\n".join(lines)
-        )
+                lines.append(
+                    f"{icon} "
+                    f"{article.get('title', '')}"
+                )
 
         await context.bot.send_message(
             chat_id=CHANNEL_USERNAME,
-            text=digest_text,
+            text="\n".join(lines),
             disable_web_page_preview=True,
         )
 
         last_digest_date = today
 
         save_state()
-
-        print(
-            "DAILY DIGEST SENT"
-        )
 
     except Exception as e:
 
@@ -2742,6 +3425,10 @@ async def post_init(
             (
                 "important",
                 "اخبار مهم",
+            ),
+            (
+                "transfers",
+                "نقل‌وانتقالات",
             ),
             (
                 "testpost",
@@ -2782,13 +3469,6 @@ def main():
     )
 
     print(
-        "TIME:",
-        now_local().strftime(
-            "%Y-%m-%d %H:%M:%S"
-        ),
-    )
-
-    print(
         "CHANNEL:",
         CHANNEL_USERNAME,
     )
@@ -2804,15 +3484,16 @@ def main():
     )
 
     print(
-        "IMAGE SYSTEM: HIGH QUALITY ENABLED"
+        "TRANSFER SYSTEM: ENABLED"
     )
 
     print(
-        "IMPORTANCE SYSTEM:"
+        "TRANSFER STATUSES:"
     )
 
     print(
-        "URGENT / IMPORTANT / NORMAL"
+        "OFFICIAL / AGREEMENT / "
+        "NEGOTIATION / RUMOR / DENIED"
     )
 
     print(
@@ -2854,6 +3535,13 @@ def main():
         CommandHandler(
             "important",
             important_command,
+        )
+    )
+
+    application.add_handler(
+        CommandHandler(
+            "transfers",
+            transfers_command,
         )
     )
 
