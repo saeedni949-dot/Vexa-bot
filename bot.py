@@ -1,27 +1,23 @@
-import os
-import json
-import re
 import asyncio
-import html
-import hashlib
-import urllib.request
-import urllib.parse
 import difflib
-
-from pathlib import Path
+import hashlib
+import json
+import os
+import re
+import urllib.parse
 from datetime import datetime, time
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import feedparser
 from openai import AsyncOpenAI
-
 from telegram import (
-    Update,
-    BotCommand,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    Update,
 )
-
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -31,9 +27,9 @@ from telegram.ext import (
 )
 
 
-# ============================================================
-# VEXA FOOTBALL BOT
-# ============================================================
+# =========================================================
+# CONFIG
+# =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -48,23 +44,18 @@ FIRST_NEWS_DELAY = 30
 DAILY_DIGEST_HOUR = 21
 DAILY_DIGEST_MINUTE = 0
 
-MAX_ARTICLES = 9
-MAX_FEED_ITEMS_PER_SOURCE = 10
-
-IMAGE_TIMEOUT = 12
-MAX_IMAGE_SIZE = 12 * 1024 * 1024
+LOCAL_TZ = ZoneInfo("Europe/Budapest")
 
 STATE_FILE = Path("vexa_state.json")
 IMAGE_CACHE_DIR = Path("vexa_images")
 
-IMAGE_CACHE_DIR.mkdir(exist_ok=True)
+MAX_ARTICLES = 8
+MAX_RECENT_ARTICLES = 200
 
-LOCAL_TZ = ZoneInfo("Europe/Budapest")
 
-
-# ============================================================
+# =========================================================
 # RSS SOURCES
-# ============================================================
+# =========================================================
 
 RSS_FEEDS = [
     {
@@ -82,9 +73,9 @@ RSS_FEEDS = [
 ]
 
 
-# ============================================================
-# MEMORY
-# ============================================================
+# =========================================================
+# GLOBAL STATE
+# =========================================================
 
 sent_links = set()
 sent_title_keys = set()
@@ -92,156 +83,39 @@ sent_content_keys = set()
 
 recent_articles = []
 
-client = (
-    AsyncOpenAI(api_key=OPENAI_API_KEY)
-    if OPENAI_API_KEY
-    else None
-)
+users = {}
+
+last_digest_date = ""
+
+openai_client = None
 
 
-# ============================================================
-# STATE
-# ============================================================
+# =========================================================
+# BASIC HELPERS
+# =========================================================
 
-def default_state():
-    return {
-        "sent_links": [],
-        "sent_title_keys": [],
-        "sent_content_keys": [],
-        "users": {},
-        "last_digest_date": "",
-    }
+def now_local():
+    return datetime.now(LOCAL_TZ)
 
 
-def load_state():
-    if not STATE_FILE.exists():
-        return default_state()
-
-    try:
-        data = json.loads(
-            STATE_FILE.read_text(
-                encoding="utf-8"
-            )
-        )
-
-        base = default_state()
-        base.update(data)
-
-        return base
-
-    except Exception as e:
-        print("STATE LOAD ERROR:", e)
-        return default_state()
-
-
-state = load_state()
-
-sent_links.update(
-    state.get("sent_links", [])
-)
-
-sent_title_keys.update(
-    state.get("sent_title_keys", [])
-)
-
-sent_content_keys.update(
-    state.get("sent_content_keys", [])
-)
-
-
-def save_state():
-    state["sent_links"] = list(sent_links)[-5000:]
-    state["sent_title_keys"] = list(sent_title_keys)[-5000:]
-    state["sent_content_keys"] = list(sent_content_keys)[-5000:]
-
-    try:
-        STATE_FILE.write_text(
-            json.dumps(
-                state,
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-
-    except Exception as e:
-        print("STATE SAVE ERROR:", e)
-
-
-# ============================================================
-# TEXT HELPERS
-# ============================================================
-
-def clean_text(value):
-    if not value:
+def safe_text(value):
+    if value is None:
         return ""
 
-    value = html.unescape(str(value))
-
-    value = re.sub(
-        r"<[^>]+>",
-        " ",
-        value,
-    )
-
-    value = re.sub(
-        r"\s+",
-        " ",
-        value,
-    )
-
-    return value.strip()
-
-
-def limit_text(text, max_chars):
-    text = clean_text(text)
-
-    if len(text) <= max_chars:
-        return text
-
-    return (
-        text[: max_chars - 1]
-        .rstrip()
-        + "…"
-    )
-
-
-def escape_html(text):
-    return html.escape(
-        str(text or ""),
-        quote=False,
-    )
+    return str(value).strip()
 
 
 def normalize_title(title):
-    title = clean_text(title).lower()
-
-    replacements = {
-        "ي": "ی",
-        "ى": "ی",
-        "ك": "ک",
-        "ۀ": "ه",
-        "ة": "ه",
-        "ؤ": "و",
-        "إ": "ا",
-        "أ": "ا",
-        "ٱ": "ا",
-    }
-
-    for old, new in replacements.items():
-        title = title.replace(
-            old,
-            new,
-        )
+    title = safe_text(title).lower()
 
     title = re.sub(
         r"https?://\S+",
-        " ",
+        "",
         title,
     )
 
     title = re.sub(
-        r"[^\wآ-ی]+",
+        r"[^\w\s]",
         " ",
         title,
         flags=re.UNICODE,
@@ -257,13 +131,11 @@ def normalize_title(title):
 
 
 def title_words(title):
-    normalized = normalize_title(title)
-
-    return {
+    return set(
         word
-        for word in normalized.split()
+        for word in normalize_title(title).split()
         if len(word) >= 3
-    }
+    )
 
 
 def title_similarity(title1, title2):
@@ -271,7 +143,7 @@ def title_similarity(title1, title2):
     b = normalize_title(title2)
 
     if not a or not b:
-        return 0
+        return 0.0
 
     sequence_score = difflib.SequenceMatcher(
         None,
@@ -283,40 +155,40 @@ def title_similarity(title1, title2):
     words_b = title_words(b)
 
     if words_a and words_b:
-
-        intersection = len(
-            words_a.intersection(
-                words_b
-            )
+        jaccard = len(
+            words_a & words_b
+        ) / len(
+            words_a | words_b
         )
-
-        union = len(
-            words_a.union(
-                words_b
-            )
-        )
-
-        word_score = (
-            intersection / union
-            if union
-            else 0
-        )
-
     else:
-        word_score = 0
+        jaccard = 0.0
 
     return max(
         sequence_score,
-        word_score,
+        jaccard,
     )
 
+
+def make_content_key(title):
+    normalized = normalize_title(title)
+
+    if not normalized:
+        return ""
+
+    return hashlib.sha256(
+        normalized.encode("utf-8")
+    ).hexdigest()
+
+
+# =========================================================
+# URL NORMALIZATION
+# =========================================================
 
 def canonicalize_url(url):
     if not url:
         return ""
 
     try:
-
         parsed = urllib.parse.urlsplit(
             url.strip()
         )
@@ -363,41 +235,123 @@ def canonicalize_url(url):
         return url.strip()
 
 
-def make_content_key(title):
-    normalized = normalize_title(title)
+# =========================================================
+# STATE
+# =========================================================
 
-    return hashlib.sha256(
-        normalized.encode("utf-8")
-    ).hexdigest()
-
-
-def make_absolute_url(base_url, url):
-    if not url:
-        return None
-
-    return urllib.parse.urljoin(
-        base_url,
-        url,
-    )
+def default_state():
+    return {
+        "sent_links": [],
+        "sent_title_keys": [],
+        "sent_content_keys": [],
+        "users": {},
+        "last_digest_date": "",
+    }
 
 
-def safe_filename(url):
-    digest = hashlib.sha1(
-        url.encode("utf-8")
-    ).hexdigest()
+def load_state():
+    global sent_links
+    global sent_title_keys
+    global sent_content_keys
+    global users
+    global last_digest_date
 
-    return f"{digest}.img"
+    if not STATE_FILE.exists():
+        print("STATE: no state file found.")
+        return
+
+    try:
+        with STATE_FILE.open(
+            "r",
+            encoding="utf-8",
+        ) as f:
+            data = json.load(f)
+
+        sent_links = set(
+            data.get(
+                "sent_links",
+                [],
+            )
+        )
+
+        sent_title_keys = set(
+            data.get(
+                "sent_title_keys",
+                [],
+            )
+        )
+
+        sent_content_keys = set(
+            data.get(
+                "sent_content_keys",
+                [],
+            )
+        )
+
+        users = data.get(
+            "users",
+            {},
+        )
+
+        last_digest_date = data.get(
+            "last_digest_date",
+            "",
+        )
+
+        print(
+            "STATE: loaded",
+            len(sent_links),
+            "links,",
+            len(sent_title_keys),
+            "titles."
+        )
+
+    except Exception as e:
+        print(
+            "STATE LOAD ERROR:",
+            type(e).__name__,
+            e,
+        )
 
 
-def now_local():
-    return datetime.now(
-        LOCAL_TZ
-    )
+def save_state():
+    data = {
+        "sent_links": list(
+            sent_links
+        )[-5000:],
+        "sent_title_keys": list(
+            sent_title_keys
+        )[-5000:],
+        "sent_content_keys": list(
+            sent_content_keys
+        )[-5000:],
+        "users": users,
+        "last_digest_date": last_digest_date,
+    }
+
+    try:
+        with STATE_FILE.open(
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump(
+                data,
+                f,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+    except Exception as e:
+        print(
+            "STATE SAVE ERROR:",
+            type(e).__name__,
+            e,
+        )
 
 
-# ============================================================
-# DUPLICATE DETECTION
-# ============================================================
+# =========================================================
+# DUPLICATE CHECK
+# =========================================================
 
 def is_duplicate_article(
     link,
@@ -405,9 +359,7 @@ def is_duplicate_article(
     source=None,
     existing_articles=None,
 ):
-    canonical_link = canonicalize_url(
-        link
-    )
+    canonical_link = canonicalize_url(link)
 
     title_key = normalize_title(
         title
@@ -417,55 +369,65 @@ def is_duplicate_article(
         title
     )
 
-    if canonical_link and canonical_link in sent_links:
+    # فقط چیزهایی که واقعاً قبلاً ارسال شده‌اند
+    # اینجا duplicate محسوب می‌شوند.
+    if (
+        canonical_link
+        and canonical_link in sent_links
+    ):
         return True
 
-    if title_key and title_key in sent_title_keys:
+    if (
+        title_key
+        and title_key in sent_title_keys
+    ):
         return True
 
-    if content_key in sent_content_keys:
+    if (
+        content_key
+        and content_key in sent_content_keys
+    ):
         return True
 
-    pool = (
-        existing_articles
-        if existing_articles is not None
-        else recent_articles
-    )
+    # بررسی duplicate داخل همین batch
+    if existing_articles is not None:
 
-    for article in pool:
+        for article in existing_articles:
 
-        old_link = canonicalize_url(
-            article.get(
-                "link",
-                "",
+            old_link = canonicalize_url(
+                article.get(
+                    "link",
+                    "",
+                )
             )
-        )
 
-        if (
-            canonical_link
-            and old_link
-            and canonical_link == old_link
-        ):
-            return True
+            if (
+                canonical_link
+                and old_link
+                and canonical_link == old_link
+            ):
+                return True
 
-        old_title = (
-            article.get(
-                "title_original",
-                "",
+            old_title = (
+                article.get(
+                    "title_original",
+                    "",
+                )
+                or
+                article.get(
+                    "title",
+                    "",
+                )
             )
-            or article.get(
-                "title",
-                "",
-            )
-        )
 
-        similarity = title_similarity(
-            title,
-            old_title,
-        )
-
-        if similarity >= 0.90:
-            return True
+            if (
+                title_similarity(
+                    title,
+                    old_title,
+                )
+                >= 0.90
+            ):
+                return True
 
     return False
 
@@ -483,7 +445,8 @@ def mark_article_sent(article):
             "title_original",
             "",
         )
-        or article.get(
+        or
+        article.get(
             "title",
             "",
         )
@@ -513,1211 +476,445 @@ def mark_article_sent(article):
     save_state()
 
 
-# ============================================================
-# IMAGE SYSTEM
-# ============================================================
-
-def add_image_candidate(
-    candidates,
-    url,
-    score,
-):
-    if not url:
-        return
-
-    url = html.unescape(
-        str(url)
-    ).strip()
-
-    url = url.replace(
-        "&amp;",
-        "&",
-    )
-
-    if url.startswith("//"):
-        url = "https:" + url
-
-    if not url.startswith(
-        (
-            "http://",
-            "https://",
-        )
-    ):
-        return
-
-    candidates.append(
-        (
-            score,
-            url,
-        )
-    )
-
-
-def get_rss_image_candidates(entry):
-    candidates = []
-
-    media_content = (
-        entry.get(
-            "media_content"
-        )
-        or []
-    )
-
-    if isinstance(
-        media_content,
-        dict,
-    ):
-        media_content = [
-            media_content
-        ]
-
-    for media in media_content:
-
-        url = media.get(
-            "url"
-        )
-
-        try:
-            width = int(
-                media.get(
-                    "width"
-                )
-                or 0
-            )
-        except Exception:
-            width = 0
-
-        score = 70
-
-        if width >= 1600:
-            score += 35
-        elif width >= 1200:
-            score += 25
-        elif width >= 800:
-            score += 15
-        elif width >= 500:
-            score += 5
-
-        add_image_candidate(
-            candidates,
-            url,
-            score,
-        )
-
-    thumbnails = (
-        entry.get(
-            "media_thumbnail"
-        )
-        or []
-    )
-
-    if isinstance(
-        thumbnails,
-        dict,
-    ):
-        thumbnails = [
-            thumbnails
-        ]
-
-    for media in thumbnails:
-
-        add_image_candidate(
-            candidates,
-            media.get("url"),
-            35,
-        )
-
-    for link in (
-        entry.get(
-            "links"
-        )
-        or []
-    ):
-
-        href = link.get(
-            "href"
-        )
-
-        mime = str(
-            link.get(
-                "type",
-                "",
-            )
-        ).lower()
-
-        if "image" in mime:
-
-            add_image_candidate(
-                candidates,
-                href,
-                65,
-            )
-
-    return candidates
-
-
-def download_article_page(url):
-
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent":
-                "Mozilla/5.0 "
-                "(compatible; "
-                "VexaFootballBot/1.0)",
-        },
-    )
-
-    with urllib.request.urlopen(
-        request,
-        timeout=IMAGE_TIMEOUT,
-    ) as response:
-
-        return response.read(
-            3_000_000
-        ).decode(
-            "utf-8",
-            errors="ignore",
-        )
-
-
-def extract_meta_images(
-    page_html,
-    article_url,
-):
-    candidates = []
-
-    patterns = [
-
-        r'<meta[^>]+property=["\']og:image["\'][^>]+content=["\']([^"\']+)',
-        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image["\']',
-
-        r'<meta[^>]+name=["\']twitter:image["\'][^>]+content=["\']([^"\']+)',
-        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image["\']',
-
-        r'<meta[^>]+property=["\']og:image:secure_url["\'][^>]+content=["\']([^"\']+)',
-        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image:secure_url["\']',
-    ]
-
-    for index, pattern in enumerate(
-        patterns
-    ):
-
-        try:
-
-            matches = re.findall(
-                pattern,
-                page_html,
-                flags=re.I,
-            )
-
-        except Exception:
-
-            matches = []
-
-        for match in matches:
-
-            add_image_candidate(
-                candidates,
-                make_absolute_url(
-                    article_url,
-                    match,
-                ),
-                125 - index * 3,
-            )
-
-    return candidates
-
-
-def choose_best_image(
-    candidates
-):
-    if not candidates:
-        return None
-
-    seen = set()
-    cleaned = []
-
-    bad_words = {
-        "logo",
-        "avatar",
-        "favicon",
-        "sprite",
-        "placeholder",
-        "icon",
-        "1x1",
-        "pixel",
-    }
-
-    for score, url in sorted(
-        candidates,
-        reverse=True,
-    ):
-
-        if url in seen:
-            continue
-
-        seen.add(url)
-
-        penalty = 0
-        lowered = url.lower()
-
-        for word in bad_words:
-
-            if word in lowered:
-                penalty += 70
-
-        cleaned.append(
-            (
-                score - penalty,
-                url,
-            )
-        )
-
-    cleaned.sort(
-        reverse=True
-    )
-
-    return (
-        cleaned[0][1]
-        if cleaned
-        else None
-    )
-
-
-def get_article_image(entry):
-
-    article_url = entry.get(
-        "link"
-    )
-
-    if article_url:
-
-        try:
-
-            page = (
-                download_article_page(
-                    article_url
-                )
-            )
-
-            candidates = (
-                extract_meta_images(
-                    page,
-                    article_url,
-                )
-            )
-
-            best = choose_best_image(
-                candidates
-            )
-
-            if best:
-                return best
-
-        except Exception as e:
-
-            print(
-                "ARTICLE IMAGE ERROR:",
-                str(e)[:150],
-            )
-
-    candidates = (
-        get_rss_image_candidates(
-            entry
-        )
-    )
-
-    return choose_best_image(
-        candidates
-    )
-
-
-def download_image_file(url):
-
-    if not url:
-        return None
-
-    cache_path = (
-        IMAGE_CACHE_DIR
-        / safe_filename(url)
-    )
-
-    if (
-        cache_path.exists()
-        and cache_path.stat().st_size
-        > 10000
-    ):
-        return cache_path
-
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent":
-                "Mozilla/5.0",
-        },
-    )
-
+# =========================================================
+# RSS
+# =========================================================
+
+def parse_feed(feed_info):
     try:
-
-        with urllib.request.urlopen(
-            request,
-            timeout=IMAGE_TIMEOUT,
-        ) as response:
-
-            data = response.read(
-                MAX_IMAGE_SIZE + 1
-            )
-
-        if len(data) > MAX_IMAGE_SIZE:
-            return None
-
-        valid = (
-            data.startswith(
-                b"\xff\xd8\xff"
-            )
-            or data.startswith(
-                b"\x89PNG\r\n\x1a\n"
-            )
-            or data.startswith(
-                b"RIFF"
-            )
-            or data.startswith(
-                b"GIF8"
-            )
+        print(
+            "RSS: checking",
+            feed_info["name"]
         )
 
-        if not valid:
-            return None
-
-        cache_path.write_bytes(
-            data
+        feed = feedparser.parse(
+            feed_info["url"]
         )
 
-        return cache_path
+        articles = []
 
-    except Exception as e:
+        for entry in feed.entries[:20]:
+
+            title = safe_text(
+                entry.get(
+                    "title",
+                    "",
+                )
+            )
+
+            link = safe_text(
+                entry.get(
+                    "link",
+                    "",
+                )
+            )
+
+            summary = safe_text(
+                entry.get(
+                    "summary",
+                    "",
+                )
+            )
+
+            published = safe_text(
+                entry.get(
+                    "published",
+                    "",
+                )
+            )
+
+            if not title or not link:
+                continue
+
+            articles.append(
+                {
+                    "source": feed_info["name"],
+                    "title_original": title,
+                    "link": link,
+                    "summary_original": summary,
+                    "published": published,
+                }
+            )
 
         print(
-            "IMAGE DOWNLOAD ERROR:",
-            str(e)[:150],
+            "RSS:",
+            feed_info["name"],
+            "->",
+            len(articles),
+            "items",
         )
 
-        return None
+        return articles
+
+    except Exception as e:
+        print(
+            "RSS ERROR:",
+            feed_info["name"],
+            type(e).__name__,
+            e,
+        )
+
+        return []
 
 
-# ============================================================
-# RSS
-# ============================================================
+async def collect_raw_articles():
+    all_articles = []
 
-def collect_raw_articles():
+    for feed_info in RSS_FEEDS:
 
-    found = []
+        articles = await asyncio.to_thread(
+            parse_feed,
+            feed_info,
+        )
 
-    seen_links = set()
-    seen_titles = []
+        for article in articles:
 
-    print(
-        "RSS: checking sources..."
-    )
+            if is_duplicate_article(
+                article.get(
+                    "link",
+                    "",
+                ),
+                article.get(
+                    "title_original",
+                    "",
+                ),
+            ):
+                continue
 
-    for source in RSS_FEEDS:
-
-        try:
-
-            feed = feedparser.parse(
-                source["url"]
+            all_articles.append(
+                article
             )
 
-            print(
-                f"RSS: {source['name']} "
-                f"-> {len(feed.entries)} items"
-            )
+    # حذف duplicate داخل batch
+    unique = []
 
-            for entry in feed.entries[
-                :MAX_FEED_ITEMS_PER_SOURCE
-            ]:
-
-                title = clean_text(
-                    entry.get(
-                        "title"
-                    )
-                )
-
-                link = entry.get(
-                    "link"
-                )
-
-                if not title or not link:
-                    continue
-
-                canonical_link = (
-                    canonicalize_url(
-                        link
-                    )
-                )
-
-                if (
-                    canonical_link
-                    in seen_links
-                ):
-                    continue
-
-                duplicate = False
-
-                for old_title in seen_titles:
-
-                    if title_similarity(
-                        title,
-                        old_title,
-                    ) >= 0.90:
-
-                        duplicate = True
-                        break
-
-                if duplicate:
-                    continue
-
-                if is_duplicate_article(
-                    canonical_link,
-                    title,
-                    source["name"],
-                ):
-                    continue
-
-                description = clean_text(
-                    entry.get(
-                        "summary"
-                    )
-                    or entry.get(
-                        "description"
-                    )
-                    or ""
-                )
-
-                published = clean_text(
-                    entry.get(
-                        "published"
-                    )
-                    or entry.get(
-                        "updated"
-                    )
-                    or ""
-                )
-
-                found.append(
-                    {
-                        "source":
-                            source["name"],
-
-                        "title_original":
-                            title,
-
-                        "summary_original":
-                            limit_text(
-                                description,
-                                900,
-                            ),
-
-                        "link":
-                            canonical_link,
-
-                        "published":
-                            published,
-
-                        "image_url":
-                            None,
-                    }
-                )
-
-                seen_links.add(
-                    canonical_link
-                )
-
-                seen_titles.append(
-                    title
-                )
-
-        except Exception as e:
-
-            print(
-                f"RSS ERROR "
-                f"[{source['name']}]:",
-                e,
-            )
-
-    print(
-        f"RSS: {len(found)} new "
-        "candidate articles"
-    )
-
-    return found
-
-
-async def collect_articles(
-    max_articles=MAX_ARTICLES,
-    fetch_images=True,
-):
-
-    raw = await asyncio.to_thread(
-        collect_raw_articles
-    )
-
-    articles = []
-
-    for entry in raw:
+    for article in all_articles:
 
         if is_duplicate_article(
-            entry["link"],
-            entry["title_original"],
-            entry["source"],
-            existing_articles=articles,
+            article.get(
+                "link",
+                "",
+            ),
+            article.get(
+                "title_original",
+                "",
+            ),
+            existing_articles=unique,
         ):
             continue
 
-        if fetch_images:
+        unique.append(article)
 
-            entry["image_url"] = (
-                await asyncio.to_thread(
-                    get_article_image,
-                    entry,
-                )
-            )
-
-        articles.append(
-            entry
-        )
-
-        if len(articles) >= max_articles:
+        if len(unique) >= MAX_ARTICLES:
             break
 
-    return articles
+    print(
+        "RSS: total new articles:",
+        len(unique),
+    )
+
+    return unique
 
 
-# ============================================================
-# AI
-# ============================================================
+# =========================================================
+# OPENAI
+# =========================================================
 
-def ai_prompt(articles):
+def get_openai_client():
 
-    payload = []
+    global openai_client
 
-    for index, article in enumerate(
-        articles
-    ):
+    if openai_client is None:
 
-        payload.append(
-            {
-                "id": index,
-                "source":
-                    article["source"],
-                "original_title":
-                    article[
-                        "title_original"
-                    ],
-                "original_summary":
-                    article[
-                        "summary_original"
-                    ],
-                "published":
-                    article[
-                        "published"
-                    ],
-            }
+        if not OPENAI_API_KEY:
+            print(
+                "OPENAI: API key is missing."
+            )
+            return None
+
+        openai_client = AsyncOpenAI(
+            api_key=OPENAI_API_KEY
         )
 
-    return f"""
-تو سردبیر حرفه‌ای یک کانال خبری فوتبال فارسی هستی.
-
-برای هر خبر:
-- عنوان کوتاه و طبیعی فارسی بنویس.
-- خلاصه 2 تا 3 جمله‌ای بنویس.
-- اطلاعات جدید اختراع نکن.
-- نام بازیکنان، مربیان و باشگاه‌ها را تغییر نده.
-- اگر اطلاعات ناقص است حدس نزن.
-- لحن خبری و جذاب باشد.
-- کلیک‌بیتی نباشد.
-
-category:
-breaking
-transfer
-match
-player
-coach
-injury
-record
-tournament
-other
-
-importance:
-high
-medium
-low
-
-style:
-classic
-breaking
-transfer
-match
-player
-stats
-
-transfer_status:
-official
-rumor
-denied
-none
-
-فقط JSON معتبر بده.
-
-ساختار:
-
-{{
-  "items": [
-    {{
-      "id": 0,
-      "title": "...",
-      "summary": "...",
-      "category": "transfer",
-      "importance": "high",
-      "emoji": "🔄",
-      "style": "transfer",
-      "transfer_status": "official"
-    }}
-  ]
-}}
-
-اخبار:
-
-{json.dumps(
-    payload,
-    ensure_ascii=False,
-)}
-"""
+    return openai_client
 
 
 async def translate_and_classify(
     articles
 ):
+    client = get_openai_client()
 
-    if not articles:
-        return []
+    if not client:
+        return articles
 
-    # اگر AI در دسترس نباشد،
-    # خبرها را متوقف نمی‌کنیم.
-    if client is None:
+    results = []
 
-        print(
-            "AI: API key missing. "
-            "Using fallback."
+    for article in articles:
+
+        title = article.get(
+            "title_original",
+            "",
         )
 
-        return fallback_articles(
-            articles
+        summary = article.get(
+            "summary_original",
+            "",
         )
 
-    try:
+        prompt = f"""
+You are a football news editor for a Persian Telegram channel.
 
-        print(
-            "AI: sending "
-            f"{len(articles)} articles..."
-        )
+Translate and rewrite this football news into natural Persian.
 
-        response = (
-            await client.responses.create(
+Rules:
+- Do not invent facts.
+- Keep the important facts.
+- Make the headline short and engaging.
+- The final text must be suitable for Telegram.
+- Do not include the source URL.
+- Do not use markdown tables.
+- Do not add unrelated opinions.
+
+Return EXACTLY in this format:
+
+TITLE:
+<short Persian title>
+
+TEXT:
+<2 to 4 short Persian paragraphs>
+
+IMPORTANT:
+<YES or NO>
+
+News source:
+{article.get("source", "")}
+
+Original title:
+{title}
+
+Original summary:
+{summary}
+"""
+
+        try:
+
+            response = await client.responses.create(
                 model=AI_MODEL,
-                input=ai_prompt(
-                    articles
-                ),
+                input=prompt,
             )
-        )
 
-        raw = (
-            response.output_text
-            .strip()
-        )
+            text = safe_text(
+                getattr(
+                    response,
+                    "output_text",
+                    "",
+                )
+            )
 
-        raw = re.sub(
-            r"^```json\s*",
-            "",
-            raw,
-            flags=re.I,
-        )
+            if not text:
+                print(
+                    "AI: empty response"
+                )
+                continue
 
-        raw = re.sub(
-            r"\s*```$",
-            "",
-            raw,
-        )
+            translated_title = ""
+            translated_text = ""
+            important = False
 
-        data = json.loads(
-            raw
-        )
+            title_match = re.search(
+                r"TITLE:\s*(.*?)(?:\n|$)",
+                text,
+                re.IGNORECASE,
+            )
 
-        items = data.get(
-            "items",
-            [],
-        )
+            text_match = re.search(
+                r"TEXT:\s*(.*?)(?:\nIMPORTANT:|$)",
+                text,
+                re.IGNORECASE | re.DOTALL,
+            )
 
-        result = []
+            important_match = re.search(
+                r"IMPORTANT:\s*(YES|NO)",
+                text,
+                re.IGNORECASE,
+            )
 
-        valid_categories = {
-            "breaking",
-            "transfer",
-            "match",
-            "player",
-            "coach",
-            "injury",
-            "record",
-            "tournament",
-            "other",
-        }
-
-        valid_importance = {
-            "high",
-            "medium",
-            "low",
-        }
-
-        valid_styles = {
-            "classic",
-            "breaking",
-            "transfer",
-            "match",
-            "player",
-            "stats",
-        }
-
-        valid_transfer = {
-            "official",
-            "rumor",
-            "denied",
-            "none",
-        }
-
-        used_indexes = set()
-
-        for item in items:
-
-            try:
-
-                idx = int(
-                    item.get(
-                        "id"
-                    )
+            if title_match:
+                translated_title = safe_text(
+                    title_match.group(1)
                 )
 
-            except Exception:
-                continue
+            if text_match:
+                translated_text = safe_text(
+                    text_match.group(1)
+                )
 
-            if (
-                idx < 0
-                or idx >= len(articles)
-                or idx in used_indexes
-            ):
-                continue
+            if important_match:
+                important = (
+                    important_match.group(1).upper()
+                    == "YES"
+                )
 
-            used_indexes.add(idx)
+            if not translated_title:
+                translated_title = title
 
-            article = dict(
-                articles[idx]
-            )
+            if not translated_text:
+                translated_text = summary
 
             article["title"] = (
-                limit_text(
-                    item.get(
-                        "title"
-                    ),
-                    160,
-                )
-                or article[
-                    "title_original"
-                ]
+                translated_title
             )
 
-            article["summary"] = (
-                limit_text(
-                    item.get(
-                        "summary"
-                    ),
-                    800,
-                )
-                or article[
-                    "summary_original"
-                ]
+            article["text"] = (
+                translated_text
             )
 
-            category = str(
-                item.get(
-                    "category",
-                    "other",
-                )
-            ).lower()
+            article["important"] = important
 
-            importance = str(
-                item.get(
-                    "importance",
-                    "medium",
-                )
-            ).lower()
-
-            style = str(
-                item.get(
-                    "style",
-                    "classic",
-                )
-            ).lower()
-
-            transfer_status = str(
-                item.get(
-                    "transfer_status",
-                    "none",
-                )
-            ).lower()
-
-            article["category"] = (
-                category
-                if category
-                in valid_categories
-                else "other"
-            )
-
-            article["importance"] = (
-                importance
-                if importance
-                in valid_importance
-                else "medium"
-            )
-
-            article["style"] = (
-                style
-                if style
-                in valid_styles
-                else "classic"
-            )
-
-            article[
-                "transfer_status"
-            ] = (
-                transfer_status
-                if transfer_status
-                in valid_transfer
-                else "none"
-            )
-
-            emoji = clean_text(
-                item.get(
-                    "emoji"
-                )
-            )
-
-            article["emoji"] = (
-                emoji[:4]
-                if emoji
-                else "⚽️"
-            )
-
-            result.append(
+            results.append(
                 article
             )
 
-        # اگر AI بعضی خبرها را جا انداخت
-        for index, article in enumerate(
-            articles
-        ):
-
-            if index in used_indexes:
-                continue
-
-            result.append(
-                make_fallback_article(
-                    article
-                )
+            print(
+                "AI:",
+                translated_title
             )
 
-        print(
-            f"AI: returned "
-            f"{len(result)} articles"
+        except Exception as e:
+
+            print(
+                "AI ERROR:",
+                type(e).__name__,
+                e,
+            )
+
+            # اگر AI خطا داد، خبر را از دست نده
+            article["title"] = title
+            article["text"] = summary
+            article["important"] = False
+
+            results.append(
+                article
+            )
+
+    return results
+
+
+# =========================================================
+# IMAGE
+# =========================================================
+
+async def fetch_image(article):
+    """
+    فعلاً از تصویر RSS استفاده می‌کنیم.
+    اگر RSS تصویر داشته باشد، آن را برمی‌گرداند.
+    """
+
+    try:
+        image_url = article.get(
+            "image",
+            "",
         )
 
-        return result
+        if image_url:
+            return image_url
 
-    except Exception as e:
+        return None
 
-        print(
-            "AI ERROR:",
-            type(e).__name__,
-            e,
-        )
-
-        print(
-            "AI: using fallback "
-            "articles."
-        )
-
-        return fallback_articles(
-            articles
-        )
+    except Exception:
+        return None
 
 
-def make_fallback_article(
-    article
-):
+# =========================================================
+# FORMAT TELEGRAM POST
+# =========================================================
 
-    result = dict(
-        article
-    )
+def build_post_text(article):
 
-    result["title"] = (
-        article[
-            "title_original"
-        ]
-    )
-
-    result["summary"] = (
-        article[
-            "summary_original"
-        ]
-        or "خبر جدید فوتبال."
-    )
-
-    result["category"] = "other"
-    result["importance"] = "medium"
-    result["style"] = "classic"
-    result["transfer_status"] = "none"
-    result["emoji"] = "⚽️"
-
-    return result
-
-
-def fallback_articles(
-    articles
-):
-
-    return [
-        make_fallback_article(
-            article
-        )
-        for article in articles
-    ]
-
-
-# ============================================================
-# NEWS FORMAT
-# ============================================================
-
-def build_news_text(article):
-
-    title = escape_html(
+    title = safe_text(
         article.get(
             "title",
             "",
         )
     )
 
-    summary = escape_html(
+    text = safe_text(
         article.get(
-            "summary",
+            "text",
             "",
         )
     )
 
-    source = escape_html(
+    source = safe_text(
         article.get(
             "source",
             "",
         )
     )
 
-    emoji = escape_html(
-        article.get(
-            "emoji",
-            "⚽️",
-        )
+    important = article.get(
+        "important",
+        False,
     )
 
-    category = article.get(
-        "category",
-        "other",
-    )
-
-    style = article.get(
-        "style",
-        "classic",
-    )
-
-    importance = article.get(
-        "importance",
-        "medium",
-    )
-
-    transfer_status = article.get(
-        "transfer_status",
-        "none",
-    )
-
-    if (
-        category == "breaking"
-        or importance == "high"
-    ):
-
-        header = (
-            "🚨 <b>خبر مهم فوتبال</b>"
-        )
-
-    elif (
-        category == "transfer"
-        or style == "transfer"
-    ):
-
-        if transfer_status == "official":
-
-            header = (
-                "✅ <b>انتقال رسمی</b>"
-            )
-
-        elif transfer_status == "rumor":
-
-            header = (
-                "🟡 <b>"
-                "نقل‌وانتقالات | شایعه"
-                "</b>"
-            )
-
-        elif transfer_status == "denied":
-
-            header = (
-                "❌ <b>"
-                "نقل‌وانتقالات | تکذیب"
-                "</b>"
-            )
-
-        else:
-
-            header = (
-                "🔄 <b>"
-                "نقل‌وانتقالات"
-                "</b>"
-            )
-
-    elif category == "match":
-
-        header = (
-            "🏟️ <b>گزارش مسابقه</b>"
-        )
-
-    elif (
-        category == "record"
-        or style == "stats"
-    ):
-
-        header = (
-            "📊 <b>آمار و رکورد</b>"
-        )
-
-    elif (
-        category == "player"
-        or style == "player"
-    ):
-
-        header = (
-            "👤 <b>"
-            "دنیای بازیکنان"
-            "</b>"
-        )
-
+    if important:
+        prefix = "🚨 خبر مهم"
     else:
+        prefix = "⚽ خبر فوتبال"
 
-        header = (
-            f"{emoji} "
-            "<b>خبر جدید فوتبال</b>"
-        )
-
-    return (
-        f"{header}\n\n"
-        f"📰 <b>{title}</b>\n\n"
-        f"📝 {summary}\n\n"
-        f"🏷 منبع: {source}"
+    post = (
+        f"{prefix}\n\n"
+        f"🔥 {title}\n\n"
+        f"{text}\n\n"
+        f"📰 منبع: {source}"
     )
 
+    return post
 
-# ============================================================
-# POSTING
-# ============================================================
+
+# =========================================================
+# TELEGRAM POST
+# =========================================================
 
 async def post_article(
     bot,
     article,
-    target=CHANNEL_USERNAME,
+    target,
 ):
-
-    text = build_news_text(
-        article
-    )
-
-    image_url = article.get(
-        "image_url"
-    )
-
     try:
+
+        text = build_post_text(
+            article
+        )
+
+        image_url = await fetch_image(
+            article
+        )
 
         if image_url:
 
-            image_path = (
-                await asyncio.to_thread(
-                    download_image_file,
-                    image_url,
+            try:
+
+                await bot.send_photo(
+                    chat_id=target,
+                    photo=image_url,
+                    caption=text[:1024],
                 )
-            )
 
-            if image_path:
+                return True
 
-                try:
+            except Exception as image_error:
 
-                    with open(
-                        image_path,
-                        "rb",
-                    ) as photo:
-
-                        await bot.send_photo(
-                            chat_id=target,
-                            photo=photo,
-                            caption=text,
-                            parse_mode="HTML",
-                            read_timeout=30,
-                            write_timeout=30,
-                        )
-
-                    print(
-                        "POST OK (photo):",
-                        article.get(
-                            "title"
-                        ),
-                    )
-
-                    return True
-
-                except Exception as e:
-
-                    print(
-                        "PHOTO POST FAILED:",
-                        e,
-                    )
+                print(
+                    "IMAGE POST FAILED:",
+                    type(image_error).__name__,
+                    image_error,
+                )
 
         await bot.send_message(
             chat_id=target,
             text=text,
-            parse_mode="HTML",
             disable_web_page_preview=True,
-            read_timeout=30,
-            write_timeout=30,
-        )
-
-        print(
-            "POST OK (text):",
-            article.get(
-                "title"
-            ),
         )
 
         return True
@@ -1725,7 +922,7 @@ async def post_article(
     except Exception as e:
 
         print(
-            "TELEGRAM POST ERROR:",
+            "POST ERROR:",
             type(e).__name__,
             e,
         )
@@ -1733,15 +930,153 @@ async def post_article(
         return False
 
 
-# ============================================================
-# PIPELINE
-# ============================================================
+# =========================================================
+# PUBLISH NEWS
+# =========================================================
+
+async def publish_news(
+    articles,
+    bot,
+    target=CHANNEL_USERNAME,
+):
+    posted = 0
+
+    print(
+        f"PUBLISH: {len(articles)} articles ready."
+    )
+
+    for article in articles:
+
+        link = canonicalize_url(
+            article.get(
+                "link",
+                "",
+            )
+        )
+
+        title = (
+            article.get(
+                "title_original",
+                "",
+            )
+            or
+            article.get(
+                "title",
+                "",
+            )
+        )
+
+        title_key = normalize_title(
+            title
+        )
+
+        content_key = make_content_key(
+            title
+        )
+
+        # فقط چیزهایی که قبلاً واقعاً
+        # در کانال ارسال شده‌اند.
+        if (
+            (link and link in sent_links)
+            or
+            (
+                title_key
+                and title_key in sent_title_keys
+            )
+            or
+            (
+                content_key
+                and content_key in sent_content_keys
+            )
+        ):
+
+            print(
+                "DUPLICATE BLOCKED:",
+                title,
+            )
+
+            continue
+
+        print(
+            "TRYING TO POST:",
+            title,
+        )
+
+        ok = await post_article(
+            bot,
+            article,
+            target,
+        )
+
+        if ok:
+
+            mark_article_sent(
+                article
+            )
+
+            posted += 1
+
+            print(
+                "CHANNEL POST SUCCESS:",
+                title,
+            )
+
+        else:
+
+            print(
+                "CHANNEL POST FAILED:",
+                title,
+            )
+
+        await asyncio.sleep(
+            1.2
+        )
+
+    print(
+        f"PUBLISH FINISHED: {posted} posted."
+    )
+
+    return posted
+
+
+# =========================================================
+# NEWS PIPELINE
+# =========================================================
+
+async def collect_articles(
+    max_articles=MAX_ARTICLES,
+    fetch_images=True,
+):
+    articles = await collect_raw_articles()
+
+    if not articles:
+        return []
+
+    articles = articles[:max_articles]
+
+    if fetch_images:
+
+        for article in articles:
+
+            try:
+
+                image = await fetch_image(
+                    article
+                )
+
+                if image:
+                    article["image"] = image
+
+            except Exception:
+                pass
+
+    return articles
+
 
 async def get_news_pipeline(
     max_articles=MAX_ARTICLES,
     fetch_images=True,
 ):
-
     articles = await collect_articles(
         max_articles=max_articles,
         fetch_images=fetch_images,
@@ -1750,14 +1085,14 @@ async def get_news_pipeline(
     if not articles:
         return []
 
-    translated = (
-        await translate_and_classify(
-            articles
-        )
+    translated = await translate_and_classify(
+        articles
     )
 
     global recent_articles
 
+    # فقط برای نگهداری تاریخچه محلی
+    # است؛ duplicate ارسال‌شدن محسوب نمی‌شود.
     recent_articles = (
         translated
         + recent_articles
@@ -1788,90 +1123,333 @@ async def get_news_pipeline(
 
     recent_articles = list(
         unique.values()
-    )[:200]
+    )[:MAX_RECENT_ARTICLES]
 
     return translated
 
 
-async def publish_news(
-    articles,
-    bot,
-    target=CHANNEL_USERNAME,
-):
+# =========================================================
+# KEYBOARD
+# =========================================================
 
-    posted = 0
+def main_keyboard():
+    keyboard = [
+        [
+            "📰 اخبار جدید",
+            "🚨 اخبار مهم",
+        ],
+        [
+            "⚽ فوتبال",
+            "🔄 بروزرسانی",
+        ],
+        [
+            "ℹ️ راهنما",
+            "❌ بستن منو",
+        ],
+    ]
 
-    print(
-        f"PUBLISH: "
-        f"{len(articles)} articles "
-        f"ready."
+    return ReplyKeyboardMarkup(
+        keyboard,
+        resize_keyboard=True,
     )
 
-    for article in articles:
 
-        original_title = (
-            article.get(
-                "title_original",
-                "",
-            )
+# =========================================================
+# COMMANDS
+# =========================================================
+
+async def start_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    user = update.effective_user
+
+    if user:
+
+        users[str(user.id)] = {
+            "id": user.id,
+            "username": user.username,
+            "first_name": user.first_name,
+        }
+
+        save_state()
+
+    await update.message.reply_text(
+        "سلام داداش 👋🔥\n\n"
+        "من Vexa هستم؛ ربات اخبار فوتبال.\n"
+        "از منوی پایین می‌تونی اخبار جدید رو بگیری.",
+        reply_markup=main_keyboard(),
+    )
+
+
+async def help_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    text = (
+        "ℹ️ راهنمای Vexa\n\n"
+        "/start - شروع ربات\n"
+        "/news - دریافت اخبار جدید\n"
+        "/important - اخبار مهم\n"
+        "/testpost - تست ارسال به کانال\n"
+        "/help - راهنما"
+    )
+
+    await update.message.reply_text(
+        text,
+        reply_markup=main_keyboard(),
+    )
+
+
+async def close_menu(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    await update.message.reply_text(
+        "منو بسته شد 👌",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+# =========================================================
+# PRIVATE NEWS
+# =========================================================
+
+async def news_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    await update.message.reply_text(
+        "⏳ دارم اخبار جدید رو بررسی می‌کنم..."
+    )
+
+    try:
+
+        articles = await get_news_pipeline(
+            max_articles=5,
+            fetch_images=False,
         )
 
-        if is_duplicate_article(
-            article.get(
-                "link",
-                "",
-            ),
-            original_title
-            or article.get(
-                "title",
-                "",
-            ),
-        ):
+        if not articles:
 
-            print(
-                "DUPLICATE BLOCKED:",
-                original_title,
+            await update.message.reply_text(
+                "فعلاً خبر جدیدی پیدا نکردم 😅",
+                reply_markup=main_keyboard(),
             )
 
-            continue
+            return
+
+        for article in articles:
+
+            await post_article(
+                context.bot,
+                article,
+                update.effective_chat.id,
+            )
+
+            await asyncio.sleep(
+                0.8
+            )
+
+    except Exception as e:
+
+        print(
+            "NEWS COMMAND ERROR:",
+            type(e).__name__,
+            e,
+        )
+
+        await update.message.reply_text(
+            "یه خطا موقع دریافت اخبار پیش اومد 😕",
+            reply_markup=main_keyboard(),
+        )
+
+
+async def important_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    await update.message.reply_text(
+        "🚨 دارم اخبار مهم رو بررسی می‌کنم..."
+    )
+
+    try:
+
+        articles = await get_news_pipeline(
+            max_articles=8,
+            fetch_images=False,
+        )
+
+        important_articles = [
+            article
+            for article in articles
+            if article.get(
+                "important",
+                False,
+            )
+        ]
+
+        if not important_articles:
+
+            await update.message.reply_text(
+                "فعلاً خبر مهمی پیدا نکردم 👌",
+                reply_markup=main_keyboard(),
+            )
+
+            return
+
+        for article in important_articles:
+
+            await post_article(
+                context.bot,
+                article,
+                update.effective_chat.id,
+            )
+
+            await asyncio.sleep(
+                0.8
+            )
+
+    except Exception as e:
+
+        print(
+            "IMPORTANT ERROR:",
+            type(e).__name__,
+            e,
+        )
+
+        await update.message.reply_text(
+            "یه خطا موقع دریافت اخبار مهم پیش اومد 😕",
+            reply_markup=main_keyboard(),
+        )
+
+
+# =========================================================
+# TEST POST
+# =========================================================
+
+async def testpost_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    test_article = {
+        "title": "تست Vexa",
+        "text": (
+            "این یک پیام آزمایشی برای بررسی "
+            "ارسال ربات به کانال است."
+        ),
+        "source": "Vexa",
+        "important": False,
+    }
+
+    try:
 
         ok = await post_article(
-            bot,
-            article,
-            target,
+            context.bot,
+            test_article,
+            CHANNEL_USERNAME,
         )
 
         if ok:
 
-            mark_article_sent(
-                article
+            await update.message.reply_text(
+                "✅ پیام تست با موفقیت به کانال ارسال شد.",
+                reply_markup=main_keyboard(),
             )
 
-            posted += 1
+        else:
 
-        await asyncio.sleep(
-            1.2
+            await update.message.reply_text(
+                "❌ ارسال پیام تست ناموفق بود.",
+                reply_markup=main_keyboard(),
+            )
+
+    except Exception as e:
+
+        print(
+            "TESTPOST ERROR:",
+            type(e).__name__,
+            e,
         )
 
-    print(
-        f"PUBLISH: "
-        f"{posted} successfully posted."
+        await update.message.reply_text(
+            "❌ خطا در تست ارسال.",
+            reply_markup=main_keyboard(),
+        )
+
+
+# =========================================================
+# BUTTON HANDLER
+# =========================================================
+
+async def button_handler(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+
+    text = safe_text(
+        update.message.text
     )
 
-    return posted
+    if text == "📰 اخبار جدید":
+
+        await news_command(
+            update,
+            context,
+        )
+
+    elif text == "🚨 اخبار مهم":
+
+        await important_command(
+            update,
+            context,
+        )
+
+    elif text == "⚽ فوتبال":
+
+        await news_command(
+            update,
+            context,
+        )
+
+    elif text == "🔄 بروزرسانی":
+
+        await news_command(
+            update,
+            context,
+        )
+
+    elif text == "ℹ️ راهنما":
+
+        await help_command(
+            update,
+            context,
+        )
+
+    elif text == "❌ بستن منو":
+
+        await close_menu(
+            update,
+            context,
+        )
 
 
-# ============================================================
-# AUTOMATIC NEWS JOB
-# ============================================================
+# =========================================================
+# AUTOMATIC NEWS
+# =========================================================
 
 async def automatic_news_job(
-    context
+    context: ContextTypes.DEFAULT_TYPE,
 ):
 
     print(
-        "\n"
-        "===================================="
+        "\n===================================="
     )
 
     print(
@@ -1892,29 +1470,26 @@ async def automatic_news_job(
 
     try:
 
-        articles = (
-            await get_news_pipeline(
-                max_articles=MAX_ARTICLES,
-                fetch_images=True,
-            )
+        articles = await get_news_pipeline(
+            max_articles=MAX_ARTICLES,
+            fetch_images=True,
         )
 
         if not articles:
 
             print(
-                "AUTO NEWS: "
-                "NO NEW ARTICLES"
+                "AUTO NEWS: NO NEW ARTICLES"
             )
 
             print(
-                "===================================="
+                "====================================\n"
             )
 
             return
 
         print(
-            "AUTO NEWS: "
-            f"{len(articles)} new articles"
+            "AUTO NEWS:",
+            f"{len(articles)} new articles",
         )
 
         posted = await publish_news(
@@ -1942,1334 +1517,200 @@ async def automatic_news_job(
     )
 
 
-# ============================================================
-# FILTERS
-# ============================================================
-
-def filter_articles(
-    articles,
-    mode,
-):
-
-    if mode == "important":
-
-        return [
-            a
-            for a in articles
-            if (
-                a.get(
-                    "importance"
-                )
-                == "high"
-                or a.get(
-                    "category"
-                )
-                == "breaking"
-            )
-        ]
-
-    if mode == "transfers":
-
-        return [
-            a
-            for a in articles
-            if a.get(
-                "category"
-            )
-            == "transfer"
-        ]
-
-    if mode == "matches":
-
-        return [
-            a
-            for a in articles
-            if a.get(
-                "category"
-            )
-            == "match"
-        ]
-
-    if mode == "players":
-
-        return [
-            a
-            for a in articles
-            if a.get(
-                "category"
-            )
-            in {
-                "player",
-                "coach",
-                "injury",
-            }
-        ]
-
-    if mode == "stats":
-
-        return [
-            a
-            for a in articles
-            if (
-                a.get(
-                    "category"
-                )
-                == "record"
-                or a.get(
-                    "style"
-                )
-                == "stats"
-            )
-        ]
-
-    return articles
-
-
-async def send_filtered_news(
-    update,
-    context,
-    mode,
-    label,
-):
-
-    await update.message.reply_text(
-        f"⏳ دارم بخش «{label}» "
-        "رو آماده می‌کنم... 🤖⚽️"
-    )
-
-    try:
-
-        articles = (
-            await get_news_pipeline(
-                max_articles=12,
-                fetch_images=True,
-            )
-        )
-
-        filtered = filter_articles(
-            articles,
-            mode,
-        )
-
-        if not filtered:
-
-            await update.message.reply_text(
-                "فعلاً خبر تازه‌ای "
-                "در این بخش پیدا نکردم. 🔎⚽️"
-            )
-
-            return
-
-        for article in filtered[:6]:
-
-            await post_article(
-                context.bot,
-                article,
-                target=(
-                    update.effective_chat.id
-                ),
-            )
-
-            await asyncio.sleep(
-                0.8
-            )
-
-        await update.message.reply_text(
-            "✅ تموم شد.",
-            reply_markup=MAIN_KEYBOARD,
-        )
-
-    except Exception as e:
-
-        print(
-            "FILTER ERROR:",
-            e,
-        )
-
-        await update.message.reply_text(
-            "یه خطا موقع آماده‌سازی "
-            "اخبار پیش اومد 😕"
-        )
-
-
-# ============================================================
+# =========================================================
 # DAILY DIGEST
-# ============================================================
-
-def build_digest(
-    articles
-):
-
-    if not articles:
-        return None
-
-    ordered = sorted(
-        articles,
-        key=lambda a:
-            0
-            if a.get(
-                "importance"
-            )
-            == "high"
-            else
-            1
-            if a.get(
-                "importance"
-            )
-            == "medium"
-            else 2,
-    )[:7]
-
-    lines = [
-        "🌙 <b>جمع‌بندی فوتبال امروز</b>",
-        "",
-    ]
-
-    for index, article in enumerate(
-        ordered,
-        1,
-    ):
-
-        emoji = escape_html(
-            article.get(
-                "emoji",
-                "⚽️",
-            )
-        )
-
-        title = escape_html(
-            article.get(
-                "title",
-                "",
-            )
-        )
-
-        lines.append(
-            f"{index}. {emoji} "
-            f"<b>{title}</b>"
-        )
-
-    lines.extend(
-        [
-            "",
-            "🤖 جمع‌بندی توسط Vexa",
-        ]
-    )
-
-    return "\n".join(
-        lines
-    )
-
+# =========================================================
 
 async def daily_digest_job(
-    context
+    context: ContextTypes.DEFAULT_TYPE,
 ):
 
-    today = now_local().strftime(
-        "%Y-%m-%d"
-    )
+    global last_digest_date
 
-    if (
-        state.get(
-            "last_digest_date"
+    today = now_local().date().isoformat()
+
+    if last_digest_date == today:
+
+        print(
+            "DIGEST: already sent today."
         )
-        == today
-    ):
+
         return
+
+    print(
+        "DAILY DIGEST STARTED"
+    )
 
     try:
 
-        articles = (
-            await get_news_pipeline(
-                max_articles=15,
-                fetch_images=False,
-            )
+        articles = await get_news_pipeline(
+            max_articles=MAX_ARTICLES,
+            fetch_images=False,
         )
 
         if not articles:
-            return
-
-        digest = build_digest(
-            articles
-        )
-
-        if digest:
-
-            await context.bot.send_message(
-                chat_id=CHANNEL_USERNAME,
-                text=digest,
-                parse_mode="HTML",
-            )
-
-            state[
-                "last_digest_date"
-            ] = today
-
-            save_state()
 
             print(
-                "DAILY DIGEST: sent."
-            )
-
-    except Exception as e:
-
-        print(
-            "DIGEST ERROR:",
-            e,
-        )
-
-
-# ============================================================
-# SEARCH
-# ============================================================
-
-def search_cached_news(
-    query
-):
-
-    query = clean_text(
-        query
-    ).lower()
-
-    if not query:
-        return []
-
-    results = []
-
-    for article in recent_articles:
-
-        haystack = " ".join(
-            [
-                article.get(
-                    "title",
-                    "",
-                ),
-                article.get(
-                    "summary",
-                    "",
-                ),
-                article.get(
-                    "title_original",
-                    "",
-                ),
-            ]
-        ).lower()
-
-        if query in haystack:
-
-            results.append(
-                article
-            )
-
-    return results[:8]
-
-
-async def search_news(
-    update,
-    context,
-    query,
-):
-
-    if not query:
-
-        await update.message.reply_text(
-            "مثلاً:\n\n"
-            "/search Real Madrid\n"
-            "/search Mbappe\n"
-            "/search نقل و انتقالات"
-        )
-
-        return
-
-    await update.message.reply_text(
-        "🔎 دارم جستجو می‌کنم..."
-    )
-
-    results = search_cached_news(
-        query
-    )
-
-    if not results:
-
-        fresh = (
-            await get_news_pipeline(
-                max_articles=15,
-                fetch_images=True,
-            )
-        )
-
-        results = search_cached_news(
-            query
-        )
-
-        if not results:
-
-            query_lower = (
-                query.lower()
-            )
-
-            results = [
-                a
-                for a in fresh
-                if query_lower
-                in (
-                    a.get(
-                        "title_original",
-                        "",
-                    ).lower()
-                    + " "
-                    + a.get(
-                        "summary_original",
-                        "",
-                    ).lower()
-                )
-            ][:8]
-
-    if not results:
-
-        await update.message.reply_text(
-            "چیزی با این عبارت پیدا نکردم. 😕"
-        )
-
-        return
-
-    await update.message.reply_text(
-        f"🔎 <b>نتایج جستجو برای:</b> "
-        f"{escape_html(query)}",
-        parse_mode="HTML",
-    )
-
-    for article in results[:6]:
-
-        await post_article(
-            context.bot,
-            article,
-            target=(
-                update.effective_chat.id
-            ),
-        )
-
-        await asyncio.sleep(
-            0.7
-        )
-
-
-# ============================================================
-# TRENDS
-# ============================================================
-
-def build_trends():
-
-    if not recent_articles:
-
-        return (
-            "📈 هنوز داده کافی "
-            "برای ترندها ندارم."
-        )
-
-    counter = {}
-
-    stop_words = {
-        "the",
-        "and",
-        "for",
-        "with",
-        "from",
-        "that",
-        "this",
-        "football",
-        "news",
-        "خبر",
-        "فوتبال",
-        "از",
-        "به",
-        "در",
-        "و",
-        "که",
-        "برای",
-        "با",
-        "این",
-        "آن",
-        "یک",
-    }
-
-    for article in recent_articles[
-        :100
-    ]:
-
-        text = " ".join(
-            [
-                article.get(
-                    "title",
-                    "",
-                ),
-                article.get(
-                    "title_original",
-                    "",
-                ),
-            ]
-        )
-
-        words = re.findall(
-            r"[A-Za-z][A-Za-z0-9_-]{3,}|[آ-ی]{4,}",
-            text,
-        )
-
-        for word in words:
-
-            key = word.lower()
-
-            if key in stop_words:
-                continue
-
-            counter[key] = (
-                counter.get(
-                    key,
-                    0,
-                )
-                + 1
-            )
-
-    top = sorted(
-        counter.items(),
-        key=lambda x:
-            x[1],
-        reverse=True,
-    )[:8]
-
-    lines = [
-        "📈 <b>"
-        "موضوعات داغ فوتبال"
-        "</b>",
-        "",
-    ]
-
-    for index, (
-        word,
-        count,
-    ) in enumerate(
-        top,
-        1,
-    ):
-
-        lines.append(
-            f"{index}. 🔥 "
-            f"{escape_html(word)} "
-            f"— {count} خبر"
-        )
-
-    return "\n".join(
-        lines
-    )
-
-
-# ============================================================
-# USER DATA
-# ============================================================
-
-def user_key(update):
-
-    if not update.effective_user:
-        return None
-
-    return str(
-        update.effective_user.id
-    )
-
-
-def get_user_data(update):
-
-    key = user_key(update)
-
-    if key is None:
-        return None
-
-    users = state.setdefault(
-        "users",
-        {},
-    )
-
-    if key not in users:
-
-        users[key] = {
-            "subscriptions": [],
-        }
-
-    return users[key]
-
-
-def user_subscriptions(update):
-
-    data = get_user_data(
-        update
-    )
-
-    if not data:
-        return []
-
-    return data.get(
-        "subscriptions",
-        [],
-    )
-
-
-def save_subscription(
-    update,
-    item,
-):
-
-    data = get_user_data(
-        update
-    )
-
-    if not data:
-        return
-
-    item = clean_text(
-        item
-    )
-
-    if not item:
-        return
-
-    subs = data.setdefault(
-        "subscriptions",
-        [],
-    )
-
-    if item.lower() not in [
-        x.lower()
-        for x in subs
-    ]:
-
-        subs.append(
-            item
-        )
-
-    data[
-        "subscriptions"
-    ] = subs[-10:]
-
-    save_state()
-
-
-def remove_subscription(
-    update,
-    item,
-):
-
-    data = get_user_data(
-        update
-    )
-
-    if not data:
-        return
-
-    item_lower = item.lower()
-
-    data[
-        "subscriptions"
-    ] = [
-        x
-        for x in data.get(
-            "subscriptions",
-            [],
-        )
-        if x.lower()
-        != item_lower
-    ]
-
-    save_state()
-
-
-# ============================================================
-# KEYBOARDS
-# ============================================================
-
-MAIN_KEYBOARD = ReplyKeyboardMarkup(
-    [
-        [
-            "📰 آخرین اخبار",
-            "🔥 اخبار مهم",
-        ],
-        [
-            "🔄 نقل‌وانتقالات",
-            "🏟️ مسابقات",
-        ],
-        [
-            "👤 بازیکنان",
-            "📊 آمار و رکورد",
-        ],
-        [
-            "🏆 لیگ‌ها",
-            "📅 جمع‌بندی امروز",
-        ],
-        [
-            "🔎 جستجو",
-            "🎯 علاقه‌مندی‌ها",
-        ],
-        [
-            "📈 ترند فوتبال",
-            "🤖 درباره Vexa",
-        ],
-        [
-            "🆘 راهنما",
-        ],
-        [
-            "❌ بستن منو",
-        ],
-    ],
-    resize_keyboard=True,
-    is_persistent=False,
-)
-
-
-# ============================================================
-# COMMANDS
-# ============================================================
-
-async def start(
-    update,
-    context,
-):
-
-    await update.message.reply_text(
-        "🤖⚽️ <b>"
-        "به Vexa خوش اومدی!"
-        "</b>\n\n"
-        "اخبار فوتبال، نقل‌وانتقالات، "
-        "بازیکنان، آمار و جستجو.",
-        parse_mode="HTML",
-        reply_markup=MAIN_KEYBOARD,
-    )
-
-
-async def help_command(
-    update,
-    context,
-):
-
-    await update.message.reply_text(
-        "🆘 <b>راهنمای Vexa</b>\n\n"
-        "📰 /news — آخرین اخبار\n"
-        "🔥 /important — اخبار مهم\n"
-        "🔄 /transfers — نقل‌وانتقالات\n"
-        "🏟️ /matches — مسابقات\n"
-        "👤 /players — بازیکنان\n"
-        "📊 /stats — آمار و رکورد\n"
-        "🏆 /leagues — لیگ‌ها\n"
-        "📅 /digest — جمع‌بندی\n"
-        "🔎 /search نام — جستجو\n"
-        "🎯 /subscribe تیم — علاقه‌مندی\n"
-        "❌ /unsubscribe تیم — حذف\n"
-        "❤️ /favorites — علاقه‌مندی‌ها\n"
-        "📈 /trends — ترندها\n"
-        "🤖 /about — درباره Vexa",
-        parse_mode="HTML",
-        reply_markup=MAIN_KEYBOARD,
-    )
-
-
-async def news_command(
-    update,
-    context,
-):
-
-    await update.message.reply_text(
-        "⏳ دارم آخرین اخبار رو "
-        "آماده می‌کنم... 🤖⚽️"
-    )
-
-    try:
-
-        articles = (
-            await get_news_pipeline(
-                max_articles=MAX_ARTICLES,
-                fetch_images=True,
-            )
-        )
-
-        if not articles:
-
-            await update.message.reply_text(
-                "فعلاً خبر تازه‌ای پیدا نکردم. 🔎"
+                "DIGEST: no articles."
             )
 
             return
 
-        for article in articles[:6]:
+        important = [
+            article
+            for article in articles
+            if article.get(
+                "important",
+                False,
+            )
+        ]
 
-            await post_article(
-                context.bot,
-                article,
-                target=(
-                    update.effective_chat.id
-                ),
+        selected = (
+            important[:5]
+            if important
+            else articles[:5]
+        )
+
+        lines = [
+            "🌙 خلاصه اخبار فوتبال امروز",
+            "",
+        ]
+
+        for index, article in enumerate(
+            selected,
+            start=1,
+        ):
+
+            title = safe_text(
+                article.get(
+                    "title",
+                    "",
+                )
             )
 
-            await asyncio.sleep(
-                0.8
+            lines.append(
+                f"{index}. {title}"
             )
 
-        await update.message.reply_text(
-            "✅ تموم شد.",
-            reply_markup=MAIN_KEYBOARD,
+        digest_text = "\n".join(
+            lines
         )
-
-    except Exception as e:
-
-        print(
-            "NEWS COMMAND ERROR:",
-            e,
-        )
-
-        await update.message.reply_text(
-            "یه خطا پیش اومد 😕"
-        )
-
-
-async def important_command(
-    update,
-    context,
-):
-
-    await send_filtered_news(
-        update,
-        context,
-        "important",
-        "اخبار مهم",
-    )
-
-
-async def transfers_command(
-    update,
-    context,
-):
-
-    await send_filtered_news(
-        update,
-        context,
-        "transfers",
-        "نقل‌وانتقالات",
-    )
-
-
-async def matches_command(
-    update,
-    context,
-):
-
-    await send_filtered_news(
-        update,
-        context,
-        "matches",
-        "مسابقات",
-    )
-
-
-async def players_command(
-    update,
-    context,
-):
-
-    await send_filtered_news(
-        update,
-        context,
-        "players",
-        "بازیکنان",
-    )
-
-
-async def stats_command(
-    update,
-    context,
-):
-
-    await send_filtered_news(
-        update,
-        context,
-        "stats",
-        "آمار و رکورد",
-    )
-
-
-async def leagues(
-    update,
-    context,
-):
-
-    await update.message.reply_text(
-        "🏆 <b>بخش لیگ‌ها</b>\n\n"
-        "اخبار لیگ‌ها فعال است.\n\n"
-        "برای جدول زنده و نتایج دقیق، "
-        "باید منبع داده ورزشی زنده "
-        "به Vexa وصل شود.\n\n"
-        "Vexa اطلاعات جدول را حدس نمی‌زند. ⚽️",
-        parse_mode="HTML",
-        reply_markup=MAIN_KEYBOARD,
-    )
-
-
-async def digest_command(
-    update,
-    context,
-):
-
-    await update.message.reply_text(
-        "⏳ دارم جمع‌بندی رو آماده می‌کنم..."
-    )
-
-    try:
-
-        articles = (
-            await get_news_pipeline(
-                max_articles=15,
-                fetch_images=False,
-            )
-        )
-
-        digest = build_digest(
-            articles
-        )
-
-        if not digest:
-
-            await update.message.reply_text(
-                "فعلاً داده کافی ندارم."
-            )
-
-            return
-
-        await update.message.reply_text(
-            digest,
-            parse_mode="HTML",
-            reply_markup=MAIN_KEYBOARD,
-        )
-
-    except Exception as e:
-
-        print(
-            "DIGEST ERROR:",
-            e,
-        )
-
-        await update.message.reply_text(
-            "خطا در ساخت جمع‌بندی 😕"
-        )
-
-
-async def trends_command(
-    update,
-    context,
-):
-
-    await update.message.reply_text(
-        build_trends(),
-        parse_mode="HTML",
-        reply_markup=MAIN_KEYBOARD,
-    )
-
-
-async def about_command(
-    update,
-    context,
-):
-
-    await update.message.reply_text(
-        "🤖 <b>Vexa Football</b>\n\n"
-        "⚽ اخبار فوتبال\n"
-        "🚨 خبرهای مهم\n"
-        "🔄 نقل‌وانتقالات\n"
-        "📊 آمار و رکورد\n"
-        "🔎 جستجو\n"
-        "🎯 علاقه‌مندی‌ها\n"
-        "📅 جمع‌بندی روزانه\n"
-        "🖼️ تصاویر خبر\n"
-        "♻️ سیستم ضدتکرار\n\n"
-        "CREATE • COMPETE • CONQUER",
-        parse_mode="HTML",
-        reply_markup=MAIN_KEYBOARD,
-    )
-
-
-async def search_command(
-    update,
-    context,
-):
-
-    query = " ".join(
-        context.args
-    ).strip()
-
-    await search_news(
-        update,
-        context,
-        query,
-    )
-
-
-async def subscribe_command(
-    update,
-    context,
-):
-
-    value = " ".join(
-        context.args
-    ).strip()
-
-    if not value:
-
-        await update.message.reply_text(
-            "مثلاً:\n\n"
-            "/subscribe Real Madrid\n"
-            "/subscribe Mbappe"
-        )
-
-        return
-
-    save_subscription(
-        update,
-        value,
-    )
-
-    await update.message.reply_text(
-        f"🎯 «{escape_html(value)}» "
-        "به علاقه‌مندی‌هات اضافه شد.",
-        parse_mode="HTML",
-        reply_markup=MAIN_KEYBOARD,
-    )
-
-
-async def unsubscribe_command(
-    update,
-    context,
-):
-
-    value = " ".join(
-        context.args
-    ).strip()
-
-    if not value:
-
-        await update.message.reply_text(
-            "مثلاً:\n"
-            "/unsubscribe Real Madrid"
-        )
-
-        return
-
-    remove_subscription(
-        update,
-        value,
-    )
-
-    await update.message.reply_text(
-        f"❌ «{escape_html(value)}» حذف شد.",
-        parse_mode="HTML",
-        reply_markup=MAIN_KEYBOARD,
-    )
-
-
-async def favorites_command(
-    update,
-    context,
-):
-
-    subs = user_subscriptions(
-        update
-    )
-
-    if not subs:
-
-        await update.message.reply_text(
-            "🎯 هنوز چیزی به "
-            "علاقه‌مندی‌هات اضافه نکردی.\n\n"
-            "مثلاً:\n"
-            "/subscribe Real Madrid"
-        )
-
-        return
-
-    text = (
-        "🎯 <b>"
-        "علاقه‌مندی‌های تو"
-        "</b>\n\n"
-    )
-
-    for item in subs:
-
-        text += (
-            f"• {escape_html(item)}\n"
-        )
-
-    await update.message.reply_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=MAIN_KEYBOARD,
-    )
-
-
-async def testpost_command(
-    update,
-    context,
-):
-
-    try:
 
         await context.bot.send_message(
             chat_id=CHANNEL_USERNAME,
-            text=(
-                "🤖⚽️ <b>Vexa Test</b>\n\n"
-                "سیستم ارسال به کانال سالم است."
-            ),
-            parse_mode="HTML",
+            text=digest_text,
         )
 
-        await update.message.reply_text(
-            "✅ پست تست به کانال ارسال شد."
+        last_digest_date = today
+
+        save_state()
+
+        print(
+            "DAILY DIGEST SENT"
         )
 
     except Exception as e:
 
         print(
-            "TEST POST ERROR:",
+            "DIGEST ERROR:",
+            type(e).__name__,
             e,
         )
 
-        await update.message.reply_text(
-            "❌ ارسال تست به کانال شکست خورد.\n\n"
-            f"خطا: {e}"
-        )
 
-
-# ============================================================
-# CLOSE MENU
-# ============================================================
-
-async def close_menu(
-    update,
-    context,
-):
-
-    await update.message.reply_text(
-        "✅ منو بسته شد.\n\n"
-        "هر وقت خواستی دوباره بازش کنی "
-        "فقط /start رو بزن.",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-
-
-# ============================================================
-# MESSAGE ROUTER
-# ============================================================
-
-async def text_router(
-    update,
-    context,
-):
-
-    text = clean_text(
-        update.message.text
-    )
-
-    if text == "❌ بستن منو":
-
-        await close_menu(
-            update,
-            context,
-        )
-
-        return
-
-    mapping = {
-
-        "📰 آخرین اخبار":
-            news_command,
-
-        "🔥 اخبار مهم":
-            important_command,
-
-        "🔄 نقل‌وانتقالات":
-            transfers_command,
-
-        "🏟️ مسابقات":
-            matches_command,
-
-        "👤 بازیکنان":
-            players_command,
-
-        "📊 آمار و رکورد":
-            stats_command,
-
-        "🏆 لیگ‌ها":
-            leagues,
-
-        "📅 جمع‌بندی امروز":
-            digest_command,
-
-        "🎯 علاقه‌مندی‌ها":
-            favorites_command,
-
-        "📈 ترند فوتبال":
-            trends_command,
-
-        "🤖 درباره Vexa":
-            about_command,
-
-        "🆘 راهنما":
-            help_command,
-    }
-
-    if text in mapping:
-
-        await mapping[text](
-            update,
-            context,
-        )
-
-        return
-
-    if text == "🔎 جستجو":
-
-        await update.message.reply_text(
-            "🔎 برای جستجو:\n\n"
-            "/search نام تیم یا بازیکن\n\n"
-            "مثلاً:\n"
-            "/search Real Madrid"
-        )
-
-        return
-
-    if (
-        len(text) >= 3
-        and not text.startswith("/")
-    ):
-
-        await search_news(
-            update,
-            context,
-            text,
-        )
-
-
-# ============================================================
-# BOT MENU
-# ============================================================
+# =========================================================
+# POST INIT
+# =========================================================
 
 async def post_init(
-    application
+    application: Application,
 ):
 
-    commands = [
-
-        BotCommand(
-            "start",
-            "شروع",
-        ),
-
-        BotCommand(
-            "news",
-            "آخرین اخبار",
-        ),
-
-        BotCommand(
-            "important",
-            "اخبار مهم",
-        ),
-
-        BotCommand(
-            "transfers",
-            "نقل‌وانتقالات",
-        ),
-
-        BotCommand(
-            "matches",
-            "مسابقات",
-        ),
-
-        BotCommand(
-            "players",
-            "بازیکنان",
-        ),
-
-        BotCommand(
-            "stats",
-            "آمار و رکورد",
-        ),
-
-        BotCommand(
-            "leagues",
-            "لیگ‌ها",
-        ),
-
-        BotCommand(
-            "digest",
-            "جمع‌بندی",
-        ),
-
-        BotCommand(
-            "search",
-            "جستجو",
-        ),
-
-        BotCommand(
-            "subscribe",
-            "افزودن علاقه‌مندی",
-        ),
-
-        BotCommand(
-            "unsubscribe",
-            "حذف علاقه‌مندی",
-        ),
-
-        BotCommand(
-            "favorites",
-            "علاقه‌مندی‌ها",
-        ),
-
-        BotCommand(
-            "trends",
-            "ترندها",
-        ),
-
-        BotCommand(
-            "about",
-            "درباره Vexa",
-        ),
-
-        BotCommand(
-            "testpost",
-            "تست ارسال",
-        ),
-
-    ]
-
     await application.bot.set_my_commands(
-        commands
+        [
+            (
+                "start",
+                "شروع ربات",
+            ),
+            (
+                "news",
+                "اخبار جدید",
+            ),
+            (
+                "important",
+                "اخبار مهم",
+            ),
+            (
+                "testpost",
+                "تست ارسال به کانال",
+            ),
+            (
+                "help",
+                "راهنما",
+            ),
+        ]
     )
 
     print(
-        "BOT COMMANDS SET"
+        "BOT COMMANDS: configured"
     )
 
 
-# ============================================================
+# =========================================================
 # MAIN
-# ============================================================
+# =========================================================
 
 def main():
 
     if not BOT_TOKEN:
 
-        raise RuntimeError(
-            "BOT_TOKEN is missing."
+        print(
+            "ERROR: BOT_TOKEN is missing."
         )
 
-    if not OPENAI_API_KEY:
+        return
 
-        raise RuntimeError(
-            "OPENAI_API_KEY is missing."
-        )
+    print(
+        "===================================="
+    )
+
+    print(
+        "VEXA BOT STARTING..."
+    )
+
+    print(
+        "TIME:",
+        now_local().strftime(
+            "%Y-%m-%d %H:%M:%S"
+        ),
+    )
+
+    print(
+        "CHANNEL:",
+        CHANNEL_USERNAME,
+    )
+
+    print(
+        "AI MODEL:",
+        AI_MODEL,
+    )
+
+    print(
+        "NEWS INTERVAL:",
+        NEWS_INTERVAL,
+        "seconds",
+    )
+
+    print(
+        "===================================="
+    )
+
+    load_state()
+
+    IMAGE_CACHE_DIR.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
     application = (
         Application.builder()
@@ -3278,14 +1719,11 @@ def main():
         .build()
     )
 
-    # --------------------------------------------------------
-    # COMMAND HANDLERS
-    # --------------------------------------------------------
-
+    # Commands
     application.add_handler(
         CommandHandler(
             "start",
-            start,
+            start_command,
         )
     )
 
@@ -3312,111 +1750,21 @@ def main():
 
     application.add_handler(
         CommandHandler(
-            "transfers",
-            transfers_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "matches",
-            matches_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "players",
-            players_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "stats",
-            stats_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "leagues",
-            leagues,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "digest",
-            digest_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "search",
-            search_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "subscribe",
-            subscribe_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "unsubscribe",
-            unsubscribe_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "favorites",
-            favorites_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "trends",
-            trends_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
-            "about",
-            about_command,
-        )
-    )
-
-    application.add_handler(
-        CommandHandler(
             "testpost",
             testpost_command,
         )
     )
 
-    # --------------------------------------------------------
-    # TEXT
-    # --------------------------------------------------------
-
+    # Keyboard
     application.add_handler(
         MessageHandler(
             filters.TEXT
             & ~filters.COMMAND,
-            text_router,
+            button_handler,
         )
     )
 
-    # --------------------------------------------------------
-    # JOB QUEUE
-    # --------------------------------------------------------
-
+    # Job Queue
     if application.job_queue:
 
         application.job_queue.run_repeating(
@@ -3437,77 +1785,31 @@ def main():
         )
 
         print(
-            "JOB QUEUE: ENABLED"
+            "JOB QUEUE: automatic news enabled."
         )
 
         print(
-            "AUTO NEWS: every",
-            NEWS_INTERVAL,
-            "seconds",
-        )
-
-        print(
-            "FIRST AUTO NEWS:",
-            FIRST_NEWS_DELAY,
-            "seconds",
-        )
-
-        print(
-            "DAILY DIGEST:",
-            f"{DAILY_DIGEST_HOUR:02d}:"
-            f"{DAILY_DIGEST_MINUTE:02d}",
-            "Europe/Budapest",
+            "JOB QUEUE: daily digest enabled."
         )
 
     else:
 
         print(
-            "WARNING: JOB QUEUE "
-            "IS NOT AVAILABLE!"
+            "WARNING: JobQueue is not available!"
         )
 
-    # --------------------------------------------------------
-    # START
-    # --------------------------------------------------------
-
     print(
-        "===================================="
-    )
-
-    print(
-        "VEXA IS RUNNING"
-    )
-
-    print(
-        "CHANNEL:",
-        CHANNEL_USERNAME,
-    )
-
-    print(
-        "AI MODEL:",
-        AI_MODEL,
-    )
-
-    print(
-        "DUPLICATE PROTECTION: ON"
-    )
-
-    print(
-        "AUTO CHANNEL POSTING: ON"
-    )
-
-    print(
-        "MENU CLOSE BUTTON: ON"
-    )
-
-    print(
-        "===================================="
+        "VEXA IS RUNNING..."
     )
 
     application.run_polling(
-        drop_pending_updates=True
+        allowed_updates=Update.ALL_TYPES
     )
 
+
+# =========================================================
+# START
+# =========================================================
 
 if __name__ == "__main__":
     main()
