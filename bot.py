@@ -7,7 +7,7 @@ import os
 import re
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, time
 from io import BytesIO
 from zoneinfo import ZoneInfo
 
@@ -24,6 +24,7 @@ from telegram.ext import (
     Application,
     CommandHandler,
     ContextTypes,
+    Defaults,
     MessageHandler,
     filters,
 )
@@ -58,7 +59,6 @@ MAX_TRANSFER_ARTICLES_PER_RUN = 6
 # RSS SOURCES
 # =========================================================
 
-# فقط منابع فوتبال عمومی
 FOOTBALL_FEEDS = [
     {
         "name": "BBC Sport Football",
@@ -73,8 +73,8 @@ FOOTBALL_FEEDS = [
 ]
 
 
-# فقط منابع اختصاصی نقل‌وانتقالات فوتبال
-# ESPN عمداً حذف شده است.
+# فقط منابع مخصوص نقل‌وانتقالات فوتبال
+# ESPN عمومی عمداً حذف شده
 TRANSFER_FEEDS = [
     {
         "name": "Sky Sports Transfer Centre",
@@ -95,7 +95,7 @@ TRANSFER_FEEDS = [
 
 
 # =========================================================
-# GLOBAL STATE
+# STATE
 # =========================================================
 
 sent_links = set()
@@ -108,16 +108,18 @@ last_digest_date = None
 
 
 # =========================================================
-# AI CLIENT
+# AI
 # =========================================================
 
-client = AsyncOpenAI(
-    api_key=OPENAI_API_KEY
-) if OPENAI_API_KEY else None
+client = (
+    AsyncOpenAI(api_key=OPENAI_API_KEY)
+    if OPENAI_API_KEY
+    else None
+)
 
 
 # =========================================================
-# STATE
+# LOAD / SAVE STATE
 # =========================================================
 
 def load_state():
@@ -131,23 +133,45 @@ def load_state():
         return
 
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
+        with open(
+            STATE_FILE,
+            "r",
+            encoding="utf-8",
+        ) as f:
             data = json.load(f)
 
-        sent_links = set(data.get("sent_links", []))
-        sent_title_keys = set(data.get("sent_title_keys", []))
-        sent_content_keys = set(data.get("sent_content_keys", []))
-        sent_transfer_keys = set(data.get("sent_transfer_keys", []))
-        last_digest_date = data.get("last_digest_date")
+        sent_links = set(
+            data.get("sent_links", [])
+        )
+
+        sent_title_keys = set(
+            data.get("sent_title_keys", [])
+        )
+
+        sent_content_keys = set(
+            data.get("sent_content_keys", [])
+        )
+
+        sent_transfer_keys = set(
+            data.get("sent_transfer_keys", [])
+        )
+
+        last_digest_date = data.get(
+            "last_digest_date"
+        )
 
         print(
-            f"STATE LOADED | links={len(sent_links)} "
+            f"STATE LOADED | "
+            f"links={len(sent_links)} "
             f"titles={len(sent_title_keys)} "
             f"transfers={len(sent_transfer_keys)}"
         )
 
     except Exception as e:
-        print("STATE LOAD ERROR:", e)
+        print(
+            "STATE LOAD ERROR:",
+            e,
+        )
 
 
 def save_state():
@@ -160,7 +184,11 @@ def save_state():
             "last_digest_date": last_digest_date,
         }
 
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
+        with open(
+            STATE_FILE,
+            "w",
+            encoding="utf-8",
+        ) as f:
             json.dump(
                 data,
                 f,
@@ -169,7 +197,10 @@ def save_state():
             )
 
     except Exception as e:
-        print("STATE SAVE ERROR:", e)
+        print(
+            "STATE SAVE ERROR:",
+            e,
+        )
 
 
 # =========================================================
@@ -181,8 +212,17 @@ def clean_text(text):
         return ""
 
     text = html.unescape(text)
-    text = re.sub(r"<[^>]+>", " ", text)
-    text = re.sub(r"\s+", " ", text)
+    text = re.sub(
+        r"<[^>]+>",
+        " ",
+        text,
+    )
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
+
     return text.strip()
 
 
@@ -191,7 +231,9 @@ def canonicalize_url(url):
         return ""
 
     try:
-        parsed = urllib.parse.urlparse(url)
+        parsed = urllib.parse.urlparse(
+            url
+        )
 
         query = urllib.parse.parse_qsl(
             parsed.query,
@@ -215,18 +257,24 @@ def canonicalize_url(url):
         ]
 
         clean = parsed._replace(
-            query=urllib.parse.urlencode(query),
+            query=urllib.parse.urlencode(
+                query
+            ),
             fragment="",
         )
 
-        return urllib.parse.urlunparse(clean).rstrip("/")
+        return urllib.parse.urlunparse(
+            clean
+        ).rstrip("/")
 
     except Exception:
         return url.strip()
 
 
 def normalize_title(title):
-    title = clean_text(title).lower()
+    title = clean_text(
+        title
+    ).lower()
 
     title = re.sub(
         r"[^a-zA-Z0-9\u0600-\u06FF\s]",
@@ -234,13 +282,19 @@ def normalize_title(title):
         title,
     )
 
-    title = re.sub(r"\s+", " ", title)
+    title = re.sub(
+        r"\s+",
+        " ",
+        title,
+    )
 
     return title.strip()
 
 
 def make_content_key(title):
-    normalized = normalize_title(title)
+    normalized = normalize_title(
+        title
+    )
 
     if not normalized:
         return ""
@@ -265,7 +319,7 @@ def title_similarity(a, b):
 
 
 # =========================================================
-# SPORT FILTERS
+# SPORT FILTER
 # =========================================================
 
 NON_FOOTBALL_TERMS = [
@@ -381,48 +435,54 @@ TRANSFER_TERMS = [
 def contains_non_football(text):
     text = text.lower()
 
-    for term in NON_FOOTBALL_TERMS:
-        if term in text:
-            return True
-
-    return False
+    return any(
+        term in text
+        for term in NON_FOOTBALL_TERMS
+    )
 
 
 def contains_football_signal(text):
     text = text.lower()
 
-    for term in FOOTBALL_TERMS:
-        if term in text:
-            return True
-
-    return False
+    return any(
+        term in text
+        for term in FOOTBALL_TERMS
+    )
 
 
 def contains_transfer_signal(text):
     text = text.lower()
 
-    for term in TRANSFER_TERMS:
-        if term in text:
-            return True
-
-    return False
+    return any(
+        term in text
+        for term in TRANSFER_TERMS
+    )
 
 
 def is_football_article(article):
-    title = article.get("title_original", "")
-    summary = article.get("summary_original", "")
+    title = article.get(
+        "title_original",
+        "",
+    )
 
-    text = f"{title} {summary}".lower()
+    summary = article.get(
+        "summary_original",
+        "",
+    )
 
-    # اول از همه ورزش‌های غیر فوتبال
+    text = (
+        f"{title} {summary}"
+    ).lower()
+
     if contains_non_football(text):
         return False
 
-    # حداقل یک نشانه فوتبال
     if not contains_football_signal(text):
-        source = article.get("source", "").lower()
+        source = article.get(
+            "source",
+            "",
+        ).lower()
 
-        # منابعی که ذاتاً فوتبال هستند
         football_sources = [
             "bbc sport football",
             "the guardian football",
@@ -431,39 +491,55 @@ def is_football_article(article):
             "the guardian rumour mill",
         ]
 
-        if not any(x in source for x in football_sources):
+        if not any(
+            source_name in source
+            for source_name in football_sources
+        ):
             return False
 
     return True
 
 
 def is_football_transfer(article):
-    """
-    فیلتر بسیار سخت‌گیرانه برای نقل‌وانتقالات.
-    """
+    title = article.get(
+        "title_original",
+        "",
+    )
 
-    title = article.get("title_original", "")
-    summary = article.get("summary_original", "")
-    source = article.get("source", "")
+    summary = article.get(
+        "summary_original",
+        "",
+    )
 
-    text = f"{title} {summary}".lower()
+    source = article.get(
+        "source",
+        "",
+    )
 
-    # رد قطعی ورزش‌های دیگر
+    text = (
+        f"{title} {summary}"
+    ).lower()
+
     if contains_non_football(text):
-        print("TRANSFER SPORT BLOCK:", title)
+        print(
+            "TRANSFER SPORT BLOCK:",
+            title,
+        )
         return False
 
-    # باید فوتبال باشد
     if not contains_football_signal(text):
-        source_lower = source.lower()
-
-        if "transfer" not in source_lower:
-            print("TRANSFER FOOTBALL SIGNAL BLOCK:", title)
+        if "transfer" not in source.lower():
+            print(
+                "TRANSFER FOOTBALL SIGNAL BLOCK:",
+                title,
+            )
             return False
 
-    # باید نشانه انتقال داشته باشد
     if not contains_transfer_signal(text):
-        print("TRANSFER SIGNAL BLOCK:", title)
+        print(
+            "TRANSFER SIGNAL BLOCK:",
+            title,
+        )
         return False
 
     return True
@@ -532,23 +608,27 @@ def contains_too_much_english(text):
         if word in COMMON_ENGLISH_WORDS
     )
 
-    # اگر چندین کلمه انگلیسی رایج پشت سر هم باقی مانده باشد
     if common_count >= 4:
         return True
 
-    if len(words) >= 10 and common_count / len(words) >= 0.25:
+    if (
+        len(words) >= 10
+        and common_count / len(words) >= 0.25
+    ):
         return True
 
     return False
 
 
 # =========================================================
-# RSS IMAGE
+# IMAGE FROM RSS
 # =========================================================
 
 def get_entry_image(entry):
     try:
-        media_content = entry.get("media_content")
+        media_content = entry.get(
+            "media_content"
+        )
 
         if media_content:
             for item in media_content:
@@ -557,7 +637,9 @@ def get_entry_image(entry):
                 if url:
                     return url
 
-        media_thumbnail = entry.get("media_thumbnail")
+        media_thumbnail = entry.get(
+            "media_thumbnail"
+        )
 
         if media_thumbnail:
             for item in media_thumbnail:
@@ -566,11 +648,19 @@ def get_entry_image(entry):
                 if url:
                     return url
 
-        for link in entry.get("links", []):
-            link_type = link.get("type", "")
+        for link in entry.get(
+            "links",
+            [],
+        ):
+            link_type = link.get(
+                "type",
+                "",
+            )
 
             if "image" in link_type:
-                url = link.get("href")
+                url = link.get(
+                    "href"
+                )
 
                 if url:
                     return url
@@ -582,7 +672,7 @@ def get_entry_image(entry):
 
 
 # =========================================================
-# DOWNLOAD IMAGE
+# IMAGE DOWNLOAD
 # =========================================================
 
 async def download_image(url):
@@ -611,7 +701,9 @@ async def download_image(url):
             ) as response:
                 return response.read()
 
-        data = await asyncio.to_thread(fetch)
+        data = await asyncio.to_thread(
+            fetch
+        )
 
         if not data:
             return None
@@ -619,7 +711,11 @@ async def download_image(url):
         return BytesIO(data)
 
     except Exception as e:
-        print("IMAGE DOWNLOAD ERROR:", e)
+        print(
+            "IMAGE DOWNLOAD ERROR:",
+            e,
+        )
+
         return None
 
 
@@ -636,45 +732,61 @@ def parse_feed(feed_info):
         )
 
         for entry in feed.entries[:30]:
+
             title = clean_text(
-                entry.get("title", "")
+                entry.get(
+                    "title",
+                    "",
+                )
             )
 
             summary = clean_text(
-                entry.get("summary", "")
-                or entry.get("description", "")
+                entry.get(
+                    "summary",
+                    "",
+                )
+                or entry.get(
+                    "description",
+                    "",
+                )
             )
 
             link = canonicalize_url(
-                entry.get("link", "")
+                entry.get(
+                    "link",
+                    "",
+                )
             )
 
             if not title or not link:
                 continue
 
-            image = get_entry_image(entry)
+            image = get_entry_image(
+                entry
+            )
 
-            article = {
-                "title_original": title,
-                "summary_original": summary,
-                "link": link,
-                "source": feed_info["name"],
-                "kind": feed_info["kind"],
-                "image": image,
-            }
-
-            articles.append(article)
+            articles.append(
+                {
+                    "title_original": title,
+                    "summary_original": summary,
+                    "link": link,
+                    "source": feed_info["name"],
+                    "kind": feed_info["kind"],
+                    "image": image,
+                }
+            )
 
     except Exception as e:
         print(
-            f"FEED ERROR | {feed_info['name']} | {e}"
+            f"FEED ERROR | "
+            f"{feed_info['name']} | {e}"
         )
 
     return articles
 
 
 # =========================================================
-# DUPLICATE CHECK
+# DUPLICATES
 # =========================================================
 
 def is_duplicate_article(
@@ -683,23 +795,45 @@ def is_duplicate_article(
     source=None,
     existing_articles=None,
 ):
-    canonical_link = canonicalize_url(link)
-    title_key = normalize_title(title)
-    content_key = make_content_key(title)
+    canonical_link = canonicalize_url(
+        link
+    )
 
-    if canonical_link and canonical_link in sent_links:
+    title_key = normalize_title(
+        title
+    )
+
+    content_key = make_content_key(
+        title
+    )
+
+    if (
+        canonical_link
+        and canonical_link in sent_links
+    ):
         return True
 
-    if title_key and title_key in sent_title_keys:
+    if (
+        title_key
+        and title_key in sent_title_keys
+    ):
         return True
 
-    if content_key and content_key in sent_content_keys:
+    if (
+        content_key
+        and content_key in sent_content_keys
+    ):
         return True
 
     if existing_articles is not None:
+
         for article in existing_articles:
+
             old_link = canonicalize_url(
-                article.get("link", "")
+                article.get(
+                    "link",
+                    "",
+                )
             )
 
             if (
@@ -710,14 +844,23 @@ def is_duplicate_article(
                 return True
 
             old_title = (
-                article.get("title_original", "")
-                or article.get("title", "")
+                article.get(
+                    "title_original",
+                    "",
+                )
+                or article.get(
+                    "title",
+                    "",
+                )
             )
 
-            if title_similarity(
-                title,
-                old_title,
-            ) >= 0.90:
+            if (
+                title_similarity(
+                    title,
+                    old_title,
+                )
+                >= 0.90
+            ):
                 return True
 
     return False
@@ -725,15 +868,24 @@ def is_duplicate_article(
 
 def transfer_event_key(article):
     player = normalize_title(
-        article.get("player", "")
+        article.get(
+            "player",
+            "",
+        )
     )
 
     from_club = normalize_title(
-        article.get("from_club", "")
+        article.get(
+            "from_club",
+            "",
+        )
     )
 
     to_club = normalize_title(
-        article.get("to_club", "")
+        article.get(
+            "to_club",
+            "",
+        )
     )
 
     status = article.get(
@@ -759,22 +911,32 @@ def transfer_event_key(article):
     ).hexdigest()
 
 
-# =========================================================
-# MARK SENT
-# =========================================================
-
 def mark_article_sent(article):
     link = canonicalize_url(
-        article.get("link", "")
+        article.get(
+            "link",
+            "",
+        )
     )
 
     title = (
-        article.get("title_original", "")
-        or article.get("title", "")
+        article.get(
+            "title_original",
+            "",
+        )
+        or article.get(
+            "title",
+            "",
+        )
     )
 
-    title_key = normalize_title(title)
-    content_key = make_content_key(title)
+    title_key = normalize_title(
+        title
+    )
+
+    content_key = make_content_key(
+        title
+    )
 
     if link:
         sent_links.add(link)
@@ -789,7 +951,9 @@ def mark_article_sent(article):
 
 
 def mark_transfer_sent(article):
-    key = transfer_event_key(article)
+    key = transfer_event_key(
+        article
+    )
 
     if key:
         sent_transfer_keys.add(key)
@@ -798,20 +962,23 @@ def mark_transfer_sent(article):
 
 
 # =========================================================
-# AI - NORMAL FOOTBALL NEWS
+# AI NORMAL NEWS
 # =========================================================
 
 async def classify_normal_news(article):
     if not client:
         return None
 
-    title = article["title_original"]
-    summary = article["summary_original"]
+    title = article[
+        "title_original"
+    ]
+
+    summary = article[
+        "summary_original"
+    ]
 
     prompt = f"""
 تو یک سردبیر حرفه‌ای اخبار فوتبال هستی.
-
-فقط و فقط درباره فوتبال کار کن.
 
 عنوان:
 {title}
@@ -819,21 +986,21 @@ async def classify_normal_news(article):
 خلاصه:
 {summary}
 
-خروجی را دقیقاً با این ساختار بده:
+خروجی دقیقاً:
 
 SPORT: FOOTBALL
 IMPORTANCE: URGENT یا IMPORTANT یا NORMAL
-TITLE: یک تیتر فارسی کوتاه و حرفه‌ای
+TITLE: تیتر فارسی کوتاه
 SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
 
 قوانین:
+- فقط فوتبال.
 - خروجی فارسی باشد.
-- خبر باید مربوط به فوتبال باشد.
-- اگر خبر مربوط به فرمول یک، موتوراسپرت، بسکتبال، تنیس، گلف یا ورزش دیگری است، SPORT را FOOTBALL نگذار.
-- بیشتر اخبار عادی باید NORMAL باشند.
-- فقط اخبار واقعاً فوری را URGENT کن.
-- اخبار مهم ولی غیرفوری IMPORTANT باشند.
-- اطلاعاتی اضافه نکن.
+- خبرهای عادی NORMAL باشند.
+- فقط خبرهای واقعاً فوری URGENT باشند.
+- خبر مهم ولی غیرفوری IMPORTANT باشد.
+- اطلاعات جدید و ساختگی اضافه نکن.
+- اگر خبر مربوط به F1، Formula 1 یا ورزش دیگری است، آن را فوتبال تشخیص نده.
 """
 
     try:
@@ -844,7 +1011,10 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
 
         text = response.output_text.strip()
 
-        if "SPORT: FOOTBALL" not in text.upper():
+        if (
+            "SPORT: FOOTBALL"
+            not in text.upper()
+        ):
             print(
                 "NORMAL SPORT BLOCK:",
                 title,
@@ -852,7 +1022,8 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
             return None
 
         importance_match = re.search(
-            r"IMPORTANCE:\s*(URGENT|IMPORTANT|NORMAL)",
+            r"IMPORTANCE:\s*"
+            r"(URGENT|IMPORTANT|NORMAL)",
             text,
             re.IGNORECASE,
         )
@@ -875,44 +1046,52 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
             re.IGNORECASE | re.DOTALL,
         )
 
-        if not title_match or not summary_match:
+        if (
+            not title_match
+            or not summary_match
+        ):
             return None
-
-        new_title = title_match.group(1).strip()
-        new_summary = summary_match.group(1).strip()
 
         return {
             **article,
-            "title": new_title,
-            "summary": new_summary,
+            "title": title_match.group(1).strip(),
+            "summary": summary_match.group(1).strip(),
             "importance": importance,
             "news_type": "NORMAL",
         }
 
     except Exception as e:
-        print("NORMAL AI ERROR:", e)
+        print(
+            "NORMAL AI ERROR:",
+            e,
+        )
+
         return None
 
 
 # =========================================================
-# AI - TRANSFER NEWS
+# AI TRANSFER NEWS
 # =========================================================
 
 async def classify_transfer_news(article):
     if not client:
         return None
 
-    # قبل از AI
-    if not is_football_transfer(article):
+    if not is_football_transfer(
+        article
+    ):
         return None
 
-    title = article["title_original"]
-    summary = article["summary_original"]
+    title = article[
+        "title_original"
+    ]
+
+    summary = article[
+        "summary_original"
+    ]
 
     prompt = f"""
 تو سردبیر تخصصی نقل‌وانتقالات فوتبال هستی.
-
-خبر زیر را بررسی کن.
 
 عنوان:
 {title}
@@ -920,7 +1099,7 @@ async def classify_transfer_news(article):
 خلاصه:
 {summary}
 
-خروجی را دقیقاً با همین ساختار بده:
+خروجی دقیقاً:
 
 SPORT: FOOTBALL
 IS_TRANSFER: YES یا NO
@@ -930,29 +1109,24 @@ TYPE: PERMANENT یا LOAN یا FREE یا EXTENSION یا RETURN یا UNKNOWN
 PLAYER: نام بازیکن
 FROM: باشگاه قبلی
 TO: باشگاه جدید
-FEE: مبلغ انتقال یا UNKNOWN
+FEE: مبلغ یا UNKNOWN
 CONTRACT: مدت قرارداد یا UNKNOWN
 TITLE: تیتر فارسی
 SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
 
-قوانین بسیار مهم:
-
-1. فقط فوتبال.
-2. اگر خبر مربوط به Formula 1، F1، MotoGP، Motorsport یا هر ورزش دیگری است:
-   SPORT: OTHER
-   و IS_TRANSFER: NO
-3. اگر خبر نقل‌وانتقال فوتبال نیست:
-   IS_TRANSFER: NO
-4. تمام TITLE و SUMMARY حتماً فارسی باشند.
-5. متن انگلیسی را عیناً کپی نکن.
-6. نام بازیکنان و باشگاه‌ها را می‌توان به شکل رایج فارسی نوشت.
-7. حدس و اطلاعات ساختگی ممنوع.
-8. RUMOR فقط برای گزارش‌های غیررسمی است.
-9. OFFICIAL فقط وقتی انتقال یا تمدید رسمی اعلام شده باشد.
-10. AGREEMENT برای توافق گزارش‌شده است.
-11. NEGOTIATION برای مذاکره است.
-12. DENIED برای تکذیب رسمی است.
-13. اگر اطلاعاتی درباره مبلغ یا قرارداد وجود ندارد، UNKNOWN بنویس.
+قوانین:
+- فقط فوتبال.
+- F1، Formula 1، MotoGP، Motorsport و سایر ورزش‌ها ممنوع.
+- اگر انتقال فوتبال نیست IS_TRANSFER: NO.
+- TITLE و SUMMARY حتماً فارسی.
+- متن انگلیسی را کپی نکن.
+- اطلاعات ساختگی اضافه نکن.
+- OFFICIAL فقط برای انتقال/تمدید رسمی.
+- AGREEMENT برای توافق گزارش‌شده.
+- NEGOTIATION برای مذاکره.
+- RUMOR برای شایعه.
+- DENIED برای تکذیب.
+- اطلاعات نامعلوم را UNKNOWN بنویس.
 """
 
     try:
@@ -963,10 +1137,6 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
 
         text = response.output_text.strip()
 
-        # -------------------------------------------------
-        # HARD SPORT CHECK
-        # -------------------------------------------------
-
         sport_match = re.search(
             r"SPORT:\s*([A-Z_]+)",
             text,
@@ -974,21 +1144,17 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
         )
 
         if not sport_match:
-            print("TRANSFER AI SPORT MISSING:", title)
             return None
 
-        sport = sport_match.group(1).upper()
-
-        if sport != "FOOTBALL":
+        if (
+            sport_match.group(1).upper()
+            != "FOOTBALL"
+        ):
             print(
                 "TRANSFER AI SPORT BLOCK:",
                 title,
             )
             return None
-
-        # -------------------------------------------------
-        # HARD TRANSFER CHECK
-        # -------------------------------------------------
 
         transfer_match = re.search(
             r"IS_TRANSFER:\s*(YES|NO)",
@@ -999,16 +1165,15 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
         if not transfer_match:
             return None
 
-        if transfer_match.group(1).upper() != "YES":
+        if (
+            transfer_match.group(1).upper()
+            != "YES"
+        ):
             print(
                 "TRANSFER AI NOT TRANSFER:",
                 title,
             )
             return None
-
-        # -------------------------------------------------
-        # FIELDS
-        # -------------------------------------------------
 
         def extract_field(name):
             match = re.search(
@@ -1023,14 +1188,33 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
                 else "UNKNOWN"
             )
 
-        status = extract_field("STATUS").upper()
-        transfer_type = extract_field("TYPE").upper()
+        status = extract_field(
+            "STATUS"
+        ).upper()
 
-        player = extract_field("PLAYER")
-        from_club = extract_field("FROM")
-        to_club = extract_field("TO")
-        fee = extract_field("FEE")
-        contract = extract_field("CONTRACT")
+        transfer_type = extract_field(
+            "TYPE"
+        ).upper()
+
+        player = extract_field(
+            "PLAYER"
+        )
+
+        from_club = extract_field(
+            "FROM"
+        )
+
+        to_club = extract_field(
+            "TO"
+        )
+
+        fee = extract_field(
+            "FEE"
+        )
+
+        contract = extract_field(
+            "CONTRACT"
+        )
 
         title_match = re.search(
             r"TITLE:\s*(.+)",
@@ -1044,28 +1228,30 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
             re.IGNORECASE | re.DOTALL,
         )
 
-        if not title_match or not summary_match:
+        if (
+            not title_match
+            or not summary_match
+        ):
             return None
 
-        new_title = title_match.group(1).strip()
-        new_summary = summary_match.group(1).strip()
+        new_title = (
+            title_match.group(1).strip()
+        )
 
-        # -------------------------------------------------
-        # FINAL OUTPUT LANGUAGE CHECK
-        # -------------------------------------------------
+        new_summary = (
+            summary_match.group(1).strip()
+        )
 
         if contains_too_much_english(
-            new_title + " " + new_summary
+            new_title
+            + " "
+            + new_summary
         ):
             print(
                 "TRANSFER ENGLISH BLOCK:",
                 new_title,
             )
             return None
-
-        # -------------------------------------------------
-        # VALID STATUS
-        # -------------------------------------------------
 
         valid_statuses = {
             "OFFICIAL",
@@ -1087,7 +1273,10 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
             "UNKNOWN",
         }
 
-        if transfer_type not in valid_types:
+        if (
+            transfer_type
+            not in valid_types
+        ):
             transfer_type = "UNKNOWN"
 
         result = {
@@ -1104,10 +1293,6 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
             "contract": contract,
         }
 
-        # -------------------------------------------------
-        # FINAL HARD FILTER
-        # -------------------------------------------------
-
         combined = (
             result["title_original"]
             + " "
@@ -1118,7 +1303,9 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
             + result["summary"]
         )
 
-        if contains_non_football(combined):
+        if contains_non_football(
+            combined
+        ):
             print(
                 "FINAL NON-FOOTBALL BLOCK:",
                 result["title"],
@@ -1128,25 +1315,31 @@ SUMMARY: خلاصه فارسی 2 تا 4 جمله‌ای
         return result
 
     except Exception as e:
-        print("TRANSFER AI ERROR:", e)
+        print(
+            "TRANSFER AI ERROR:",
+            e,
+        )
+
         return None
 
 
 # =========================================================
-# PERSIAN CLEANUP
+# FORCE PERSIAN
 # =========================================================
 
 async def force_persian_transfer(article):
-    """
-    اگر خروجی AI هنوز بیش از حد انگلیسی بود،
-    یک مرحله پاکسازی فارسی انجام می‌شود.
-    """
-
     if not client:
         return None
 
-    title = article.get("title", "")
-    summary = article.get("summary", "")
+    title = article.get(
+        "title",
+        "",
+    )
+
+    summary = article.get(
+        "summary",
+        "",
+    )
 
     if not contains_too_much_english(
         title + " " + summary
@@ -1154,9 +1347,9 @@ async def force_persian_transfer(article):
         return article
 
     prompt = f"""
-این متن یک خبر نقل‌وانتقال فوتبال است.
+این خبر مربوط به نقل‌وانتقالات فوتبال است.
 
-آن را فقط به فارسی روان و حرفه‌ای بازنویسی کن.
+آن را به فارسی روان و حرفه‌ای بازنویسی کن.
 
 تیتر:
 {title}
@@ -1164,7 +1357,7 @@ async def force_persian_transfer(article):
 متن:
 {summary}
 
-فقط این دو خط را بده:
+فقط:
 
 TITLE: تیتر فارسی
 SUMMARY: خلاصه فارسی
@@ -1192,19 +1385,25 @@ SUMMARY: خلاصه فارسی
             re.IGNORECASE | re.DOTALL,
         )
 
-        if not title_match or not summary_match:
+        if (
+            not title_match
+            or not summary_match
+        ):
             return None
 
-        new_title = title_match.group(1).strip()
-        new_summary = summary_match.group(1).strip()
+        new_title = (
+            title_match.group(1).strip()
+        )
+
+        new_summary = (
+            summary_match.group(1).strip()
+        )
 
         if contains_too_much_english(
-            new_title + " " + new_summary
+            new_title
+            + " "
+            + new_summary
         ):
-            print(
-                "PERSIAN CLEANUP FAILED:",
-                new_title,
-            )
             return None
 
         return {
@@ -1218,6 +1417,7 @@ SUMMARY: خلاصه فارسی
             "PERSIAN CLEANUP ERROR:",
             e,
         )
+
         return None
 
 
@@ -1229,6 +1429,7 @@ async def get_normal_news():
     collected = []
 
     for feed_info in FOOTBALL_FEEDS:
+
         articles = await asyncio.to_thread(
             parse_feed,
             feed_info,
@@ -1236,7 +1437,9 @@ async def get_normal_news():
 
         for article in articles:
 
-            if not is_football_article(article):
+            if not is_football_article(
+                article
+            ):
                 continue
 
             if is_duplicate_article(
@@ -1249,7 +1452,9 @@ async def get_normal_news():
 
             collected.append(article)
 
-    return collected[:MAX_ARTICLES_PER_RUN]
+    return collected[
+        :MAX_ARTICLES_PER_RUN
+    ]
 
 
 # =========================================================
@@ -1268,8 +1473,9 @@ async def get_transfer_news():
 
         for article in articles:
 
-            # فیلتر قبل از AI
-            if not is_football_transfer(article):
+            if not is_football_transfer(
+                article
+            ):
                 continue
 
             if is_duplicate_article(
@@ -1282,11 +1488,13 @@ async def get_transfer_news():
 
             collected.append(article)
 
-    return collected[:MAX_TRANSFER_ARTICLES_PER_RUN]
+    return collected[
+        :MAX_TRANSFER_ARTICLES_PER_RUN
+    ]
 
 
 # =========================================================
-# NEWS PIPELINE
+# PIPELINES
 # =========================================================
 
 async def get_news_pipeline():
@@ -1300,17 +1508,13 @@ async def get_news_pipeline():
             article
         )
 
-        if not processed:
-            continue
-
-        final_articles.append(processed)
+        if processed:
+            final_articles.append(
+                processed
+            )
 
     return final_articles
 
-
-# =========================================================
-# TRANSFER PIPELINE
-# =========================================================
 
 async def get_transfer_pipeline():
     raw_articles = await get_transfer_news()
@@ -1333,7 +1537,6 @@ async def get_transfer_pipeline():
         if not processed:
             continue
 
-        # انتقال تکراری با تفاوت جزئی در لینک/منبع
         event_key = transfer_event_key(
             processed
         )
@@ -1345,34 +1548,39 @@ async def get_transfer_pipeline():
             )
             continue
 
-        # بررسی نهایی
         combined = (
             processed.get("title", "")
             + " "
             + processed.get("summary", "")
         )
 
-        if contains_non_football(combined):
+        if contains_non_football(
+            combined
+        ):
             print(
                 "TRANSFER FINAL SPORT BLOCK:",
                 processed.get("title"),
             )
             continue
 
-        if contains_too_much_english(combined):
+        if contains_too_much_english(
+            combined
+        ):
             print(
                 "TRANSFER FINAL LANGUAGE BLOCK:",
                 processed.get("title"),
             )
             continue
 
-        final_articles.append(processed)
+        final_articles.append(
+            processed
+        )
 
     return final_articles
 
 
 # =========================================================
-# TRANSFER LABEL
+# TRANSFER LABELS
 # =========================================================
 
 def transfer_status_label(status):
@@ -1390,7 +1598,9 @@ def transfer_status_label(status):
     )
 
 
-def transfer_type_label(transfer_type):
+def transfer_type_label(
+    transfer_type
+):
     labels = {
         "PERMANENT": "انتقال دائمی",
         "LOAN": "قرضی",
@@ -1474,16 +1684,10 @@ def build_post_text(article):
             "UNKNOWN",
         )
 
-        label = transfer_status_label(
-            status
-        )
-
-        type_label = transfer_type_label(
-            transfer_type
-        )
-
         lines = [
-            f"{label}",
+            transfer_status_label(
+                status
+            ),
             "",
             f"🔥 {title}",
             "",
@@ -1491,20 +1695,33 @@ def build_post_text(article):
             "",
         ]
 
-        if player and player != "UNKNOWN":
+        if (
+            player
+            and player != "UNKNOWN"
+        ):
             lines.append(
                 f"👤 بازیکن: {player}"
             )
 
-        if from_club and from_club != "UNKNOWN":
+        if (
+            from_club
+            and from_club != "UNKNOWN"
+        ):
             lines.append(
                 f"🔵 از: {from_club}"
             )
 
-        if to_club and to_club != "UNKNOWN":
+        if (
+            to_club
+            and to_club != "UNKNOWN"
+        ):
             lines.append(
                 f"🟢 به: {to_club}"
             )
+
+        type_label = transfer_type_label(
+            transfer_type
+        )
 
         if type_label:
             lines.append(
@@ -1516,7 +1733,10 @@ def build_post_text(article):
                 f"💰 مبلغ: {fee}"
             )
 
-        if contract and contract != "UNKNOWN":
+        if (
+            contract
+            and contract != "UNKNOWN"
+        ):
             lines.append(
                 f"📄 قرارداد: {contract}"
             )
@@ -1531,7 +1751,7 @@ def build_post_text(article):
         return "\n".join(lines)
 
     # -----------------------------------------------------
-    # NORMAL NEWS
+    # NORMAL
     # -----------------------------------------------------
 
     level = article.get(
@@ -1555,7 +1775,7 @@ def build_post_text(article):
 
 
 # =========================================================
-# IMAGE PREPARATION
+# IMAGE
 # =========================================================
 
 async def prepare_image(article):
@@ -1573,7 +1793,7 @@ async def prepare_image(article):
 
 
 # =========================================================
-# POST ARTICLE
+# POST
 # =========================================================
 
 async def post_article(
@@ -1591,6 +1811,7 @@ async def post_article(
         )
 
         if image:
+
             await bot.send_photo(
                 chat_id=target,
                 photo=InputFile(
@@ -1601,6 +1822,7 @@ async def post_article(
             )
 
         else:
+
             await bot.send_message(
                 chat_id=target,
                 text=text[:4096],
@@ -1629,7 +1851,7 @@ async def post_article(
 
 
 # =========================================================
-# PUBLISH NEWS
+# PUBLISH
 # =========================================================
 
 async def publish_news(
@@ -1642,7 +1864,10 @@ async def publish_news(
     for article in articles:
 
         link = canonicalize_url(
-            article.get("link", "")
+            article.get(
+                "link",
+                "",
+            )
         )
 
         title = (
@@ -1664,10 +1889,6 @@ async def publish_news(
             title
         )
 
-        # ---------------------------------------------
-        # DUPLICATE
-        # ---------------------------------------------
-
         if (
             (link and link in sent_links)
             or (
@@ -1685,11 +1906,10 @@ async def publish_news(
             )
             continue
 
-        # ---------------------------------------------
-        # TRANSFER EXTRA SAFETY
-        # ---------------------------------------------
-
-        if article.get("news_type") == "TRANSFER":
+        # فیلتر نهایی نقل‌وانتقالات
+        if article.get(
+            "news_type"
+        ) == "TRANSFER":
 
             if not is_football_transfer(
                 article
@@ -1711,10 +1931,6 @@ async def publish_news(
                 )
                 continue
 
-        # ---------------------------------------------
-        # POST
-        # ---------------------------------------------
-
         success = await post_article(
             bot,
             article,
@@ -1727,17 +1943,21 @@ async def publish_news(
                 article
             )
 
-            if article.get(
-                "news_type"
-            ) == "TRANSFER":
-
+            if (
+                article.get(
+                    "news_type"
+                )
+                == "TRANSFER"
+            ):
                 mark_transfer_sent(
                     article
                 )
 
             posted += 1
 
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(
+            1.2
+        )
 
     return posted
 
@@ -1851,7 +2071,7 @@ async def transfers_command(
 
         if not articles:
             await update.message.reply_text(
-                "فعلاً انتقال جدید و قابل‌اعتمادی پیدا نکردم."
+                "فعلاً انتقال جدید و قابل‌انتشاری پیدا نکردم."
             )
             return
 
@@ -1881,7 +2101,7 @@ async def important_command(
     context: ContextTypes.DEFAULT_TYPE,
 ):
     await update.message.reply_text(
-        "🔥 برای بررسی اخبار مهم، فیدهای فوتبال بررسی می‌شوند..."
+        "🔥 دارم اخبار مهم فوتبال رو بررسی می‌کنم..."
     )
 
     try:
@@ -1892,7 +2112,8 @@ async def important_command(
             for article in articles
             if article.get(
                 "importance"
-            ) in {
+            )
+            in {
                 "URGENT",
                 "IMPORTANT",
             }
@@ -1930,10 +2151,13 @@ async def testpost_command(
 ):
     try:
         test_article = {
-            "title": "Vexa آماده دریافت اخبار فوتبال است",
+            "title": (
+                "Vexa آماده دریافت "
+                "اخبار فوتبال است"
+            ),
             "summary": (
-                "این یک پیام آزمایشی برای بررسی عملکرد "
-                "ارسال ربات است."
+                "این یک پیام آزمایشی برای "
+                "بررسی عملکرد ارسال ربات است."
             ),
             "source": "Vexa",
             "news_type": "NORMAL",
@@ -1972,30 +2196,35 @@ async def button_handler(
     text = update.message.text
 
     if text == "📰 اخبار جدید":
+
         await news_command(
             update,
             context,
         )
 
     elif text == "🔥 اخبار مهم":
+
         await important_command(
             update,
             context,
         )
 
     elif text == "🔄 نقل‌وانتقالات":
+
         await transfers_command(
             update,
             context,
         )
 
     elif text == "ℹ️ راهنما":
+
         await help_command(
             update,
             context,
         )
 
     elif text == "❌ بستن منو":
+
         await update.message.reply_text(
             "منو بسته شد 👌",
             reply_markup=ReplyKeyboardRemove(),
@@ -2003,7 +2232,7 @@ async def button_handler(
 
 
 # =========================================================
-# AUTO NEWS JOB
+# AUTOMATIC NEWS
 # =========================================================
 
 async def auto_news_job(
@@ -2017,13 +2246,11 @@ async def auto_news_job(
 
     try:
 
-        # ---------------------------------------------
-        # NORMAL FOOTBALL NEWS
-        # ---------------------------------------------
-
+        # اخبار عادی فوتبال
         news = await get_news_pipeline()
 
         if news:
+
             count = await publish_news(
                 news,
                 context.bot,
@@ -2035,13 +2262,13 @@ async def auto_news_job(
                 f"NORMAL NEWS POSTED: {count}"
             )
 
-        # ---------------------------------------------
-        # TRANSFERS
-        # ---------------------------------------------
-
-        transfers = await get_transfer_pipeline()
+        # نقل‌وانتقالات
+        transfers = (
+            await get_transfer_pipeline()
+        )
 
         if transfers:
+
             count = await publish_news(
                 transfers,
                 context.bot,
@@ -2086,6 +2313,7 @@ async def daily_digest_job(
         return
 
     try:
+
         text = (
             "📊 خلاصه فعالیت امروز Vexa\n\n"
             f"📰 تعداد اخبار ارسال‌شده: "
@@ -2135,14 +2363,18 @@ async def post_init(
         f"AI MODEL: {AI_MODEL}"
     )
 
-    # اولین بررسی 30 ثانیه بعد از اجرا
+    print(
+        f"TIMEZONE: {TIMEZONE}"
+    )
+
+    # اولین بررسی
     application.job_queue.run_once(
         auto_news_job,
         when=FIRST_NEWS_DELAY,
         name="first_news_check",
     )
 
-    # بررسی خودکار هر 10 دقیقه
+    # هر 10 دقیقه
     application.job_queue.run_repeating(
         auto_news_job,
         interval=NEWS_INTERVAL,
@@ -2150,13 +2382,14 @@ async def post_init(
         name="automatic_news",
     )
 
-    # خلاصه روزانه
+    # خلاصه روزانه ساعت 21:00
+    # اینجا دیگر tuple نداریم؛ time واقعی است
     application.job_queue.run_daily(
         daily_digest_job,
-        time=(
-            DIGEST_HOUR,
-            DIGEST_MINUTE,
-            0,
+        time=time(
+            hour=DIGEST_HOUR,
+            minute=DIGEST_MINUTE,
+            second=0,
         ),
         name="daily_digest",
     )
@@ -2185,6 +2418,7 @@ async def error_handler(
 # =========================================================
 
 def main():
+
     if not BOT_TOKEN:
         raise RuntimeError(
             "BOT_TOKEN environment variable is missing."
@@ -2197,9 +2431,17 @@ def main():
 
     load_state()
 
+    # نکته مهم:
+    # Defaults باعث می‌شود زمان‌بندی JobQueue
+    # بر اساس Europe/Budapest باشد.
+    defaults = Defaults(
+        tzinfo=TIMEZONE
+    )
+
     application = (
         Application.builder()
         .token(BOT_TOKEN)
+        .defaults(defaults)
         .post_init(post_init)
         .build()
     )
@@ -2268,6 +2510,10 @@ def main():
         drop_pending_updates=True
     )
 
+
+# =========================================================
+# RUN
+# =========================================================
 
 if __name__ == "__main__":
     main()
